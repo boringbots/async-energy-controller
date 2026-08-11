@@ -1,0 +1,63 @@
+# Async Energy controller — example systemd USER unit.
+#
+# Use this shape when the job needs YOUR login user's environment rather than a
+# dedicated service account. Group membership is usually the deciding factor: a
+# job that shells out to `docker exec` needs the `docker` group, and adding a
+# system account to that group is a meaningfully larger grant than it first
+# appears — docker group membership is effectively root on the host.
+#
+# The system-unit shape (hm-async-controller.service) is still right on a shared
+# box, or when the work runs as a service account anyway.
+#
+# Install (as your normal user — no sudo except where noted):
+#   1. Install the package and write your config:
+#        python3 -m venv ~/async-energy/venv
+#        ~/async-energy/venv/bin/pip install -e /path/to/async-energy-controller
+#        # (GPU box: pip install -e '/path/to/async-energy-controller[gpu]')
+#        cp .env.example ~/async-energy/.env      # then fill it in
+#        chmod 600 ~/async-energy/.env            # it holds a password
+#        cp jobs.example.json ~/async-energy/jobs.json   # then edit
+#
+#   2. >>> ENABLE LINGER — do not skip this one: <<<
+#        sudo loginctl enable-linger $USER
+#
+#      Without it, systemd stops your user manager when you log out and takes the
+#      daemon with it. A job placed at 00:10 then simply never fires, and nothing
+#      appears in any log to explain why — the controller was not running to say
+#      anything. For a product whose entire purpose is running work overnight
+#      while nobody is watching, this is the failure mode to rule out first.
+#      Check it with: loginctl show-user $USER --property=Linger
+#
+#   3. Install and start the unit:
+#        mkdir -p ~/.config/systemd/user
+#        cp deploy/hm-async-controller.user.service ~/.config/systemd/user/
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now hm-async-controller
+#        journalctl --user -u hm-async-controller -f
+#
+#   4. Confirm the setup end to end before trusting it overnight:
+#        ~/async-energy/venv/bin/async-energy-controller --check
+#
+# Edit the paths below (%h expands to your home directory).
+
+[Unit]
+Description=Async Energy controller (executes optimizer schedules as this user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/async-energy
+# .env is read from WorkingDirectory by pydantic-settings; EnvironmentFile also
+# exports it to the process. The '-' prefix makes a missing file non-fatal so the
+# unit still starts (the app logs and exits cleanly if HM_ASYNC_API_URL is unset).
+EnvironmentFile=-%h/async-energy/.env
+# --watch-catalog pairs well with a user unit: edit jobs.json (or let `register`
+# write to it) and the new entry runs without restarting the daemon.
+ExecStart=%h/async-energy/venv/bin/async-energy-controller --poll-interval 30 --watch-catalog
+Restart=on-failure
+RestartSec=10
+
+[Install]
+# NOT multi-user.target — a user unit installs into the user session.
+WantedBy=default.target

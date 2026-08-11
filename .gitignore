@@ -1,0 +1,48 @@
+# Secrets and per-box config — NEVER commit these.
+.env
+jobs.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Marker dropped by the upstream export script so it knows this tree is a
+# previous export and safe to regenerate. Must exist on disk, must never be
+# committed.
+.async-energy-export
+
+# --- Internal, never publish -------------------------------------------------
+# This directory is BOTH the working tree and the thing that gets pushed to a
+# public repo, so anything dropped in here is one `git add -A` away from being
+# public. Keep internal material behind these patterns, and run
+# `git status --short` before committing.
+# (Patterns only — git does NOT strip trailing comments, so a note on the same
+# line becomes part of the pattern and silently stops it matching.)
+#
+# user/integration feedback and review notes:
+*-feedback.md
+# local push instructions / credential reminders:
+PUBLISHING.md
+# scratch space for anything not meant to ship:
+/private/
+/scratch/

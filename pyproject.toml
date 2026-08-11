@@ -1,0 +1,56 @@
+[build-system]
+# >=77 for PEP 639 (SPDX `license` string + `license-files`).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "async-energy-controller"
+version = "0.2.0"
+description = "Async Energy on-box controller: executes optimizer schedules, profiles GPU energy, reports run records."
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+authors = [{ name = "Async Energy" }]
+keywords = ["energy", "scheduling", "gpu", "llm", "time-of-use", "demand-response"]
+classifiers = [
+    "Environment:: GPU:: NVIDIA CUDA",
+    "Intended Audience:: System Administrators",
+    "Operating System:: POSIX:: Linux",
+    "Programming Language:: Python:: 3.12",
+    "Topic:: System:: Distributed Computing",
+]
+
+# The canonical pin list. Deliberately thin: the controller is a client — an HTTP
+# client and a settings parser, nothing more. No web framework, no server stack.
+dependencies = [
+    "httpx==0.28.1",
+    "pydantic==2.13.3",
+    "pydantic-settings==2.14.0",
+]
+
+[project.urls]
+Homepage = "https://async.energy"
+Documentation = "https://async.energy/quickstart/"
+Source = "https://github.com/boringbots/async-energy-controller"
+Issues = "https://github.com/boringbots/async-energy-controller/issues"
+
+[project.optional-dependencies]
+# NVIDIA GPU boxes only — lazy-imported by profiler.py's NVMLProfiler. Absent →
+# get_profiler() falls back to SmiProfiler (nvidia-smi CLI) or NullProfiler, so
+# the controller installs and runs on a box with no GPU.
+#   pip install -e ".[gpu]"
+gpu = ["nvidia-ml-py==12.560.30"]
+# Test-only.
+test = ["pytest==9.0.3"]
+
+# Console entrypoints: `pip install -e.` puts BOTH on PATH.
+# `async-energy-controller` is the public, branded name and what the docs use.
+# `hm-async-controller` is the original internal name, kept as a permanent alias
+# so existing installs and systemd units keep working — do not remove it.
+[project.scripts]
+async-energy-controller = "hmasync_controller.cli:main"
+hm-async-controller = "hmasync_controller.cli:main"
+
+[tool.setuptools]
+packages = ["hmasync_controller"]

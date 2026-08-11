@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Map each workflow id you registered with the API to what THIS box runs.",
+    "Copy to jobs.json and edit. The controller only ever runs what appears here —",
+    "a scheduled workflow with no entry is skipped with a warning, never fetched",
+    "from the server.",
+    "",
+    "Comment keys like this one are SAFE TO KEEP: the catalog loader keeps only",
+    "object-valued entries, so any string or array value is dropped cleanly. JSON",
+    "gives you no other way to annotate a file, and a catalog benefits from notes.",
+    "",
+    "`async-energy-controller register` writes entries here for you, including the",
+    "workflow id, so you never copy a UUID by hand. `--check` validates the result."
+  ],
+
+  "00000000-0000-0000-0000-000000000001": {
+    "name": "nightly-embeddings",
+    "framework": "ollama",
+    "request": {
+      "model": "nomic-embed-text",
+      "prompt_file": "/data/queue/embed-batch.txt"
+    }
+  },
+
+  "00000000-0000-0000-0000-000000000002": {
+    "name": "nightly-research",
+    "framework": "command",
+    "request": {
+      "command": "python /opt/agents/nightly_research.py"
+    }
+  },
+
+  "00000000-0000-0000-0000-000000000003": {
+    "name": "fed-sentiment",
+    "framework": "command",
+    "_comment": "The argv-list form. Prefer it once any argument contains a space or a quote — it sidesteps shell quoting entirely, where the string form is shlex-split first.",
+    "request": {
+      "command": ["docker", "exec", "my-container", "python", "job.py", "--years", "1"],
+      "cwd": "/opt/agents"
+    }
+  },
+
+  "00000000-0000-0000-0000-000000000004": {
+    "name": "summarize-ingested",
+    "framework": "openai",
+    "request": {
+      "base_url": "http://localhost:8000/v1",
+      "model": "Qwen/Qwen3-8B",
+      "prompt": "Summarize today's ingested documents.",
+      "timeout": 1800
+    }
+  }
+}

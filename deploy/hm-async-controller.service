@@ -1,0 +1,49 @@
+# Async Energy controller — example systemd unit.
+#
+# The controller is a long-running client that polls the optimizer API, executes
+# the scheduled jobs under the GPU profiler, and reports run records upstream.
+#
+# Install (as root, on the AI box):
+#   1. Create a dedicated user + working dir:
+#        useradd --system --create-home --home-dir /opt/async-energy hmasync
+#   2. As that user, install the package into a venv and provide config:
+#        git clone https://github.com/boringbots/async-energy-controller.git /opt/async-energy/src
+#        python3 -m venv /opt/async-energy/venv
+#        /opt/async-energy/venv/bin/pip install -e /opt/async-energy/src
+#        # (GPU box: pip install -e '/opt/async-energy/src[gpu]')
+#        cp /opt/async-energy/src/.env.example /opt/async-energy/.env   # then fill it in
+#        chmod 600 /opt/async-energy/.env                           # it holds a password
+#        cp /opt/async-energy/src/jobs.example.json /opt/async-energy/jobs.json  # then edit
+#   3. Copy this file to /etc/systemd/system/hm-async-controller.service and edit
+#      the paths/user below to match, then:
+#        systemctl daemon-reload
+#        systemctl enable --now hm-async-controller
+#        journalctl -u hm-async-controller -f
+#
+# The unit keeps the `hm-async-controller` name and ExecStart binary: both that
+# and `async-energy-controller` are installed, and keeping the legacy name here
+# means an existing deployment survives an upgrade untouched.
+
+[Unit]
+Description=Async Energy controller (executes optimizer schedules on this box)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hmasync
+WorkingDirectory=/opt/async-energy
+#.env is read from WorkingDirectory by pydantic-settings; EnvironmentFile also
+# exports it to the process (both point at the same file). The '-' prefix makes a
+# missing file non-fatal so the unit still starts (the app logs and exits cleanly
+# if HM_ASYNC_API_URL is unset).
+EnvironmentFile=-/opt/async-energy/.env
+ExecStart=/opt/async-energy/venv/bin/hm-async-controller --poll-interval 30
+Restart=on-failure
+RestartSec=10
+# The GPU profiler samples telemetry but never needs elevated privileges beyond
+# NVML/RAPL read access. Tighten as your box allows.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
