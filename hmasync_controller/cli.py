@@ -37,10 +37,11 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from hmasync_controller.adapters import (
     AdapterError,
@@ -761,7 +762,96 @@ def run_bench(
             f"Opted out — BENCH_OPTIN=false written to {env_path}. "
             "No further benchmark data will be sent."
         )
-    return 2, "usage: async-energy-controller bench {opt-in,opt-out}"
+    return 2, "usage: async-energy-controller bench {opt-in,opt-out,quick}"
+
+
+# ============================================================
+# bench quick — run the ~25-minute suite through the operator's eb
+# ============================================================
+#
+# Foreground, output NOT captured: stdout/stderr are inherited so the suite's
+# own progress prints straight to the operator's terminal, live, the same as
+# if they had typed `eb quick` themselves. The 45-minute timeout is a
+# backstop against a wedged run, not a target, and is injectable for tests.
+
+BENCH_QUICK_TIMEOUT_S = 45 * 60.0
+BENCH_PREFLIGHT_TIMEOUT_S = 10.0
+
+
+def _bench_utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _bench_install_hint(cmd: str) -> str:
+    return (
+        f"`{cmd}` was not found on this box. Install energy-bench (see its README "
+        f"for the current install method) so `{cmd}` runs, or point ENERGY_BENCH_CMD "
+        "at the right command."
+    )
+
+
+def _bench_cmd_available(cmd: str) -> bool:
+    """Preflight: can `cmd --help` even be exec'd?
+
+    The exit status is not checked — a `--help` that itself exits non-zero is
+    still evidence the binary runs. Only "cannot be executed at all" (missing
+    binary, not executable, hangs past the preflight timeout) counts as absent.
+    """
+    try:
+        subprocess.run([cmd, "--help"], capture_output=True, timeout=BENCH_PREFLIGHT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _bench_bundle_path(
+    bundle_dir: str | os.PathLike[str], *, now_fn: Callable[[], datetime]
+) -> Path:
+    ts = now_fn().strftime("%Y%m%dT%H%M%SZ")
+    return Path(bundle_dir) / f"bundle-{ts}.json"
+
+
+def run_bench_quick(
+    settings: Settings,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float = BENCH_QUICK_TIMEOUT_S,
+) -> tuple[int, str]:
+    """Run `eb quick --share-out <bundle>` in the foreground; hand off on opt-in.
+
+    `submit_fn` is the seam a later story wires to the real submission client
+    (POST /api/v1/bench/submissions, spool-on-failure). Until that exists, an
+    opted-in operator sees the bundle path and a plain note that nothing is
+    wired up yet, rather than a pointer to a command that does not exist.
+    """
+    cmd = settings.ENERGY_BENCH_CMD
+    if not _bench_cmd_available(cmd):
+        return 2, _bench_install_hint(cmd)
+
+    bundle_dir = Path(settings.BENCH_BUNDLE_DIR)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = _bench_bundle_path(bundle_dir, now_fn=now_fn or _bench_utcnow)
+
+    try:
+        proc = subprocess.run([cmd, "quick", "--share-out", str(bundle_path)], timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return 1, f"{cmd} quick did not finish within {int(timeout_s)}s; no bundle was written"
+    except OSError as exc:
+        return 1, f"failed to run {cmd} quick: {exc}"
+
+    if proc.returncode != 0:
+        return 1, f"{cmd} quick exited {proc.returncode}; no bundle was written"
+    if not bundle_path.exists():
+        return 1, f"{cmd} quick exited 0 but {bundle_path} was not written"
+
+    message = f"bundle written to {bundle_path}"
+    if not settings.BENCH_OPTIN:
+        return 0, message
+    if submit_fn is None:
+        return 0, f"{message}\nbench_optin is set, but no submitter is wired up on this build yet."
+    sub_code, sub_message = submit_fn(str(bundle_path), settings)
+    return sub_code, f"{message}\n{sub_message}"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -919,6 +1009,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Opt in to sharing benchmark data. Prints what is shared first.",
     )
     bench_sub.add_parser("opt-out", help="Opt out of sharing benchmark data.")
+    bench_sub.add_parser(
+        "quick",
+        help="Run the ~25-minute energy-bench quick suite and write a bundle.",
+    )
 
     return parser.parse_args(argv)
 
@@ -939,7 +1033,10 @@ def main(argv: list[str] | None = None) -> int:
         return code
 
     if getattr(args, "subcommand", None) == "bench":
-        code, message = run_bench(args)
+        if getattr(args, "bench_subcommand", None) == "quick":
+            code, message = run_bench_quick(settings)
+        else:
+            code, message = run_bench(args)
         print(message)
         return code
 

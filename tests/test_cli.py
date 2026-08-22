@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 
 import pytest
 
@@ -868,3 +869,188 @@ def test_main_dispatches_bench_optin(tmp_path, monkeypatch, capsys):
     assert cli.main(["bench", "opt-in"]) == 0
     assert "BENCH_OPTIN=true" in (tmp_path / ".env").read_text()
     assert "hardware fingerprint" in capsys.readouterr().out
+
+
+# ============================================================
+# bench quick (US-ONB-03)
+# ============================================================
+#
+# `eb` is stubbed with a real (tiny) executable script rather than a
+# monkeypatched subprocess.run, so the preflight check, argument plumbing,
+# and foreground/timeout behavior all run for real — just against a fake
+# binary instead of the real energy-bench, and with no network involved.
+
+_EB_STUB_SUCCESS = """#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "eb (stub)"
+  exit 0
+fi
+if [ "$1" = "quick" ]; then
+  shift
+  out=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --share-out) out="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  echo "stub: running quick suite"
+  printf '{"tier": "C", "stub": true}' > "$out"
+  exit 0
+fi
+exit 1
+"""
+
+_EB_STUB_QUICK_FAILS = """#!/bin/sh
+if [ "$1" = "--help" ]; then
+  exit 0
+fi
+if [ "$1" = "quick" ]; then
+  echo boom 1>&2
+  exit 1
+fi
+exit 1
+"""
+
+_EB_STUB_QUICK_HANGS = """#!/bin/sh
+if [ "$1" = "--help" ]; then
+  exit 0
+fi
+if [ "$1" = "quick" ]; then
+  sleep 5
+  exit 0
+fi
+exit 1
+"""
+
+
+def _write_eb_stub(tmp_path, body: str, name: str = "eb-stub") -> str:
+    script = tmp_path / name
+    script.write_text(body)
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_bench_quick_subcommand_parses():
+    args = cli._parse_args(["bench", "quick"])
+    assert args.subcommand == "bench"
+    assert args.bench_subcommand == "quick"
+
+
+def test_bench_quick_preflight_missing_binary_prints_install_hint(tmp_path):
+    settings = _settings(tmp_path, ENERGY_BENCH_CMD=str(tmp_path / "no-such-eb"))
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 2
+    assert "not found" in message
+    assert "ENERGY_BENCH_CMD" in message
+
+
+def test_bench_quick_writes_bundle_on_success(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
+    bundle_dir = tmp_path / "bundles"
+    settings = _settings(
+        tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(bundle_dir)
+    )
+    fixed_now = datetime(2026, 8, 22, 12, 0, 0, tzinfo=timezone.utc)
+
+    code, message = cli.run_bench_quick(settings, now_fn=lambda: fixed_now)
+
+    assert code == 0
+    bundle_path = bundle_dir / "bundle-20260822T120000Z.json"
+    assert bundle_path.exists()
+    assert json.loads(bundle_path.read_text()) == {"tier": "C", "stub": True}
+    assert str(bundle_path) in message
+
+
+def test_bench_quick_no_optin_does_not_hand_off(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
+    settings = _settings(
+        tmp_path,
+        ENERGY_BENCH_CMD=eb,
+        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
+        BENCH_OPTIN=False,
+    )
+    calls = []
+
+    code, message = cli.run_bench_quick(
+        settings, submit_fn=lambda path, s: (calls.append((path, s)), (0, "submitted"))[1]
+    )
+
+    assert code == 0
+    assert calls == []
+    assert "submitted" not in message
+
+
+def test_bench_quick_optin_hands_off_to_submitter(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
+    settings = _settings(
+        tmp_path,
+        ENERGY_BENCH_CMD=eb,
+        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
+        BENCH_OPTIN=True,
+    )
+    calls = []
+
+    def fake_submit(path, s):
+        calls.append((path, s))
+        return 0, "submitted ok"
+
+    code, message = cli.run_bench_quick(settings, submit_fn=fake_submit)
+
+    assert code == 0
+    assert len(calls) == 1
+    assert calls[0][0].endswith(".json")
+    assert calls[0][1] is settings
+    assert "submitted ok" in message
+
+
+def test_bench_quick_optin_without_submitter_notes_it_honestly(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
+    settings = _settings(
+        tmp_path,
+        ENERGY_BENCH_CMD=eb,
+        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
+        BENCH_OPTIN=True,
+    )
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 0
+    assert "no submitter is wired up" in message
+
+
+def test_bench_quick_nonzero_exit_is_an_error_and_writes_no_bundle(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_QUICK_FAILS)
+    bundle_dir = tmp_path / "bundles"
+    settings = _settings(tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(bundle_dir))
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 1
+    assert "exited 1" in message
+    assert not list(bundle_dir.glob("*.json"))
+
+
+def test_bench_quick_timeout_is_a_clean_error(tmp_path):
+    eb = _write_eb_stub(tmp_path, _EB_STUB_QUICK_HANGS)
+    settings = _settings(
+        tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(tmp_path / "bundles")
+    )
+
+    code, message = cli.run_bench_quick(settings, timeout_s=0.3)
+
+    assert code == 1
+    assert "did not finish" in message
+
+
+def test_main_dispatches_bench_quick(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(
+        cli, "run_bench_quick", lambda settings: (0, "bundle written to x.json")
+    )
+
+    assert cli.main(["bench", "quick"]) == 0
+    assert "bundle written" in capsys.readouterr().out
