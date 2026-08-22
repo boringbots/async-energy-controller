@@ -49,7 +49,12 @@ from hmasync_controller.adapters import (
     normalize_command,
 )
 from hmasync_controller.apiclient import ApiClient
-from hmasync_controller.config import Settings, resolve_controller_id
+from hmasync_controller.config import (
+    BENCH_CONSENT_TEXT,
+    Settings,
+    resolve_controller_id,
+    set_bench_optin,
+)
 from hmasync_controller.executor import ScheduleExecutor
 from hmasync_controller.profiler import get_profiler
 from hmasync_controller.reporter import RunReporter
@@ -723,8 +728,40 @@ def run_register(
         f"  workflow_id  {workflow_id}\n"
         f"  catalog      {catalog_path}\n"
         f"  framework    {args.framework}\n"
-        "Run `--check` to confirm it lands in the next schedule."
+        "Run `--check` to confirm it lands in the next schedule.\n"
+        "Tip: contribute ~25 minutes of benchmark data to improve your own "
+        "scheduling — run `bench opt-in` to see what is shared."
     )
+
+
+# ============================================================
+# bench opt-in / opt-out — explicit, headless-safe consent
+# ============================================================
+#
+# BENCH_OPTIN gates everything the later bench stories do (running the suite,
+# submitting a bundle, sending hardware-profile hints). Nothing bench-related
+# ever leaves the box until an operator runs `bench opt-in`, and doing so
+# always prints BENCH_CONSENT_TEXT first — there is no flag to flip blind. No
+# interactive (y/n) prompt: a systemd box or a script has no TTY to answer one.
+
+DEFAULT_ENV_PATH = ".env"
+
+
+def run_bench(
+    args: argparse.Namespace, *, env_path: str | os.PathLike[str] = DEFAULT_ENV_PATH
+) -> tuple[int, str]:
+    """Dispatch `bench opt-in` / `bench opt-out`. Persists BENCH_OPTIN; no prompt."""
+    sub = getattr(args, "bench_subcommand", None)
+    if sub == "opt-in":
+        set_bench_optin(True, env_path)
+        return 0, f"{BENCH_CONSENT_TEXT}\nOpted in — BENCH_OPTIN=true written to {env_path}."
+    if sub == "opt-out":
+        set_bench_optin(False, env_path)
+        return 0, (
+            f"Opted out — BENCH_OPTIN=false written to {env_path}. "
+            "No further benchmark data will be sent."
+        )
+    return 2, "usage: async-energy-controller bench {opt-in,opt-out}"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -865,6 +902,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     reg.add_argument("--log-level", default=argparse.SUPPRESS, help="Logging level (default: INFO).")
 
+    # `bench` gathers opt-in/opt-out now; later stories add `quick`, `submit`,
+    # and `register-node` as siblings under the same subparsers object.
+    bench = sub.add_parser(
+        "bench",
+        help="Opt in/out of contributing benchmark data to Async Energy.",
+        description=(
+            "Contribute measured benchmark data to Async Energy's shared model. "
+            "Off by default — `bench opt-in` prints exactly what is shared "
+            "before turning it on. No interactive prompt, safe to run headless."
+        ),
+    )
+    bench_sub = bench.add_subparsers(dest="bench_subcommand")
+    bench_sub.add_parser(
+        "opt-in",
+        help="Opt in to sharing benchmark data. Prints what is shared first.",
+    )
+    bench_sub.add_parser("opt-out", help="Opt out of sharing benchmark data.")
+
     return parser.parse_args(argv)
 
 
@@ -880,6 +935,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(args, "subcommand", None) == "register":
         code, message = run_register(settings, args)
+        print(message)
+        return code
+
+    if getattr(args, "subcommand", None) == "bench":
+        code, message = run_bench(args)
         print(message)
         return code
 

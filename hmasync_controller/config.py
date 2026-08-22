@@ -8,7 +8,9 @@ ApiClient and Spool are built lazily by whatever wires them together.
 
 from __future__ import annotations
 
+import os
 import socket
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,6 +57,16 @@ class Settings(BaseSettings):
     # API can never stall the executor loop (sampling/overhead).
     HTTP_TIMEOUT_S: float = 10.0
 
+    # --- bench opt-in (contribute measured benchmark data upstream) ---
+    # Off by default: nothing bench-related is ever sent until the operator runs
+    # `bench opt-in`, which persists this flag (see set_bench_optin below).
+    BENCH_OPTIN: bool = False
+    # Where `bench quick` writes its dated bundle files.
+    BENCH_BUNDLE_DIR: str = "bench_bundles"
+    # The energy-bench CLI command installed on this box. Not on PyPI yet, so
+    # this stays a plain command name rather than a package pin.
+    ENERGY_BENCH_CMD: str = "eb"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -79,3 +91,55 @@ def resolve_controller_id(configured: str | None) -> str:
 # `Settings()` (e.g. in tests) is equally valid — nothing here is a singleton by
 # necessity.
 settings = Settings()
+
+
+# What `bench opt-in` actually turns on. Printed verbatim by the CLI before the
+# flag is set, so consent is informed rather than a name on a flag nobody read.
+BENCH_CONSENT_TEXT = """\
+Opting in shares, per benchmark submission:
+  - a hardware fingerprint: GPU model name, VRAM (GB), driver version, CPU
+    model, and RAM (GB)
+  - software versions: this controller and energy-bench
+  - benchmark metrics: energy (Wh), duration, throughput, and related numbers
+    produced by the suite
+
+It never shares prompts, commands, workflow definitions, or any workflow data.
+It never shares GPU UUIDs, serial numbers, MAC addresses, hostnames, or Home
+Assistant entity ids — this box is identified only by a salted local hash,
+generated once and never transmitted in raw form.
+
+Data license: submitted results feed Async Energy's shared routing-table and
+cold-start-prediction aggregates. Opting out stops future submissions; it does
+not withdraw data already submitted.
+"""
+
+
+def set_bench_optin(value: bool, env_path: str | os.PathLike[str] = ".env") -> None:
+    """Persist BENCH_OPTIN by upserting its line in the `.env` file.
+
+    Follows the same care as `cli.write_catalog_entry`: every other line
+    (including an operator's comments) is preserved untouched, and the write is
+    atomic (temp file + `os.replace`) so a running process never reads a
+    half-written `.env`. A missing file is created with just this one line —
+    the empty-environment policy means every other value still resolves from
+    its own default or a real environment variable.
+    """
+    path = Path(env_path)
+    lines = path.read_text().splitlines() if path.exists() else []
+    new_line = f"BENCH_OPTIN={'true' if value else 'false'}"
+
+    out: list[str] = []
+    updated = False
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line else None
+        if key == "BENCH_OPTIN":
+            out.append(new_line)
+            updated = True
+        else:
+            out.append(line)
+    if not updated:
+        out.append(new_line)
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(out) + "\n")
+    os.replace(tmp, path)

@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import os
 
-from hmasync_controller.config import Settings, resolve_controller_id
+from hmasync_controller.config import (
+    BENCH_CONSENT_TEXT,
+    Settings,
+    resolve_controller_id,
+    set_bench_optin,
+)
 
 
 def _write_env(tmp_path, body: str):
@@ -89,3 +94,85 @@ def test_resolve_controller_id_prefers_configured():
 
 def test_resolve_controller_id_falls_back_to_hostname():
     assert resolve_controller_id("") != ""
+
+
+# ============================================================
+# Bench opt-in settings + consent (US-ONB-02)
+# ============================================================
+
+
+def test_bench_settings_default_off(monkeypatch):
+    for key in ("BENCH_OPTIN", "BENCH_BUNDLE_DIR", "ENERGY_BENCH_CMD"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.BENCH_OPTIN is False
+    assert settings.BENCH_BUNDLE_DIR == "bench_bundles"
+    assert settings.ENERGY_BENCH_CMD == "eb"
+
+
+def test_bench_optin_comes_from_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("BENCH_OPTIN", raising=False)
+    env = _write_env(tmp_path, "BENCH_OPTIN=true\n")
+    assert Settings(_env_file=str(env)).BENCH_OPTIN is True
+
+
+def test_consent_text_states_what_is_shared_and_not():
+    text = BENCH_CONSENT_TEXT.lower()
+    # What a submission contains.
+    for included in ("hardware fingerprint", "version", "benchmark metrics"):
+        assert included in text
+    # What it explicitly does not contain.
+    for excluded in ("prompts", "commands", "workflow"):
+        assert excluded in text
+    # The denylisted identity fields (also enforced upstream in US-ONB-05).
+    for identity_field in ("uuid", "serial", "mac address", "hostname", "entity id"):
+        assert identity_field in text
+    # The data-license line.
+    assert "license" in text
+
+
+def test_set_bench_optin_writes_a_fresh_env_file(tmp_path):
+    env = tmp_path / ".env"
+    set_bench_optin(True, env)
+    assert "BENCH_OPTIN=true" in env.read_text().splitlines()
+
+
+def test_set_bench_optin_updates_in_place_without_disturbing_other_lines(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("HM_ASYNC_EMAIL=me@example.com\nBENCH_OPTIN=false\nCONTROLLER_ID=box-1\n")
+
+    set_bench_optin(True, env)
+
+    lines = env.read_text().splitlines()
+    assert "BENCH_OPTIN=true" in lines
+    assert "HM_ASYNC_EMAIL=me@example.com" in lines
+    assert "CONTROLLER_ID=box-1" in lines
+    assert lines.count("BENCH_OPTIN=false") == 0
+    # Only ever one BENCH_OPTIN line.
+    assert sum(1 for line in lines if line.startswith("BENCH_OPTIN=")) == 1
+
+
+def test_set_bench_optin_preserves_comments(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("# a header a human wrote\nHM_ASYNC_EMAIL=me@example.com\n")
+
+    set_bench_optin(True, env)
+
+    text = env.read_text()
+    assert "# a header a human wrote" in text
+    assert "BENCH_OPTIN=true" in text
+
+
+def test_set_bench_optin_round_trips_through_settings(tmp_path):
+    env = tmp_path / ".env"
+    set_bench_optin(True, env)
+    assert Settings(_env_file=str(env)).BENCH_OPTIN is True
+
+    set_bench_optin(False, env)
+    assert Settings(_env_file=str(env)).BENCH_OPTIN is False
+
+
+def test_set_bench_optin_writes_atomically(tmp_path):
+    env = tmp_path / ".env"
+    set_bench_optin(True, env)
+    assert not (tmp_path / ".env.tmp").exists()

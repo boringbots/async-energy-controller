@@ -782,6 +782,19 @@ def test_enabled_is_omitted_when_not_disabled(tmp_path, make_client, fake_api):
     assert "enabled" not in fake_api.created_workflows[0]
 
 
+def test_register_success_points_at_bench_optin(tmp_path, make_client, fake_api):
+    """A no-interactive-prompt pointer, printed once, after a successful register."""
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+
+    _code, message = cli.run_register(
+        _settings(tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test"),
+        args, client=make_client(),
+    )
+
+    assert "bench opt-in" in message
+
+
 def test_register_surfaces_a_400_naming_the_bad_field(tmp_path, make_client, fake_api):
     """The API refuses an unparseable deadline; that message is the useful one."""
     fake_api.workflows_status = 400
@@ -797,3 +810,61 @@ def test_register_surfaces_a_400_naming_the_bad_field(tmp_path, make_client, fak
     assert code == 1
     assert "deadline: could not parse" in message
     assert not path.exists()
+
+
+# ============================================================
+# bench opt-in / opt-out (US-ONB-02)
+# ============================================================
+#
+# Explicit, headless-safe consent: no interactive (y/n) prompt (a systemd box
+# has no TTY to answer one), and opting in always prints what is shared before
+# the flag is persisted.
+
+
+def test_bench_subcommand_parses():
+    args = cli._parse_args(["bench", "opt-in"])
+    assert args.subcommand == "bench"
+    assert args.bench_subcommand == "opt-in"
+
+    args = cli._parse_args(["bench", "opt-out"])
+    assert args.bench_subcommand == "opt-out"
+
+
+def test_bench_optin_persists_the_flag_and_prints_consent(tmp_path):
+    env = tmp_path / ".env"
+    args = cli._parse_args(["bench", "opt-in"])
+
+    code, message = cli.run_bench(args, env_path=env)
+
+    assert code == 0
+    assert "BENCH_OPTIN=true" in env.read_text()
+    assert "hardware fingerprint" in message
+    assert "Opted in" in message
+
+
+def test_bench_optout_persists_the_flag(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("BENCH_OPTIN=true\n")
+    args = cli._parse_args(["bench", "opt-out"])
+
+    code, message = cli.run_bench(args, env_path=env)
+
+    assert code == 0
+    assert "BENCH_OPTIN=false" in env.read_text()
+    assert "Opted out" in message
+
+
+def test_bench_with_no_subcommand_is_a_usage_error(tmp_path):
+    args = cli._parse_args(["bench"])
+    code, message = cli.run_bench(args, env_path=tmp_path / ".env")
+    assert code == 2
+    assert "opt-in" in message and "opt-out" in message
+    assert not (tmp_path / ".env").exists()
+
+
+def test_main_dispatches_bench_optin(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    assert cli.main(["bench", "opt-in"]) == 0
+    assert "BENCH_OPTIN=true" in (tmp_path / ".env").read_text()
+    assert "hardware fingerprint" in capsys.readouterr().out
