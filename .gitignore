@@ -52,7 +52,7 @@ CLAUDE.md
 prd.json
 progress.txt
 ralph.sh
-.ralph-logs/
-.ralph-archive/
+# every .ralph-* file and directory: logs, archive, and the last-branch marker
+.ralph-*
 .venv-linux/
 tasks/
