@@ -58,8 +58,13 @@ from hmasync_controller.config import (
     set_bench_optin,
 )
 from hmasync_controller.executor import ScheduleExecutor
-from hmasync_controller.fingerprint import collect_fingerprint
-from hmasync_controller.profiler import Profiler, get_profiler
+from hmasync_controller.fingerprint import (
+    collect_fingerprint,
+    compute_node_hash,
+    load_or_create_salt,
+)
+from hmasync_controller.powercap import PowerCapManager
+from hmasync_controller.profiler import NVMLProfiler, Profiler, get_profiler
 from hmasync_controller.reporter import RunReporter
 from hmasync_controller.spool import Spool
 
@@ -355,13 +360,26 @@ def build_executor(
         bench_spool = Spool(settings.BENCH_SPOOL_PATH)
         extra_drain = lambda: drain_bench_spool(client, bench_spool).drained  # noqa: E731
 
+    # A single profiler instance for BOTH telemetry sampling and the power cap
+    # (when wired) — they share the same NVML handle, not two separate inits.
+    profiler = get_profiler()
+
+    # Independent of BENCH_OPTIN (see config.APPLY_POWER_CAP): only requires
+    # this box to actually have an NVML-backed GPU, since there is nothing to
+    # cap otherwise.
+    power_cap = None
+    if settings.APPLY_POWER_CAP and isinstance(profiler, NVMLProfiler):
+        node_hash = compute_node_hash(load_or_create_salt(settings.NODE_SALT_PATH))
+        power_cap = PowerCapManager(client=client, profiler=profiler, node_hash=node_hash)
+
     return ScheduleExecutor(
         client=client,
         reporter=reporter,
         job_source=job_source,
-        profiler=get_profiler(),
+        profiler=profiler,
         controller_id=controller_id,
         extra_drain=extra_drain,
+        power_cap=power_cap,
     )
 
 

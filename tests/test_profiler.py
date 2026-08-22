@@ -26,6 +26,7 @@ from hmasync_controller.profiler import (
     CAP_UTIL,
     NullProfiler,
     NVMLProfiler,
+    PowerCapPermissionError,
     ProfilerUnavailable,
     RunTelemetry,
     SmiProfiler,
@@ -64,6 +65,7 @@ class FakeNvml:
     NVML_TEMPERATURE_GPU = 0
     NVML_CLOCK_SM = 1
     NVMLError = _NvmlError
+    NVMLError_NoPermission = type("NVMLError_NoPermission", (_NvmlError,), {})
 
     # Throttle-reason bit constants the decoder looks up by name.
     nvmlClocksThrottleReasonGpuIdle = 0x1
@@ -86,6 +88,8 @@ class FakeNvml:
         disabled=(),  # channel names to make raise NVMLError
         gpu_name="NVIDIA GeForce RTX 4090",
         driver_version="550.90.07",
+        power_limit_mw=300_000,
+        deny_set_power_limit=False,
     ):
         self.power_mw = power_mw
         self.util = _Util(util_gpu, util_mem)
@@ -101,6 +105,9 @@ class FakeNvml:
         self.count = 1
         self.gpu_name = gpu_name
         self.driver_version = driver_version
+        self.power_limit_mw = power_limit_mw
+        self.deny_set_power_limit = deny_set_power_limit
+        self.set_power_limit_calls: list[int] = []
 
     def _guard(self, name):
         if name in self.disabled:
@@ -157,6 +164,17 @@ class FakeNvml:
     def nvmlSystemGetDriverVersion(self):
         self._guard("driver_version")
         return self.driver_version
+
+    def nvmlDeviceGetPowerManagementLimit(self, h):
+        self._guard("power_limit")
+        return self.power_limit_mw
+
+    def nvmlDeviceSetPowerManagementLimit(self, h, limit_mw):
+        if self.deny_set_power_limit:
+            raise self.NVMLError_NoPermission("not privileged")
+        self._guard("power_limit")
+        self.set_power_limit_calls.append(limit_mw)
+        self.power_limit_mw = limit_mw
 
 
 class _FakePath:
@@ -361,6 +379,67 @@ def test_nvml_device_fingerprint_degrades_per_channel():
     p = NVMLProfiler(nvml=fake)
     fp = p.device_fingerprint()
     assert fp == {}
+
+
+# ============================================================
+# NVML power-management limit (US-ONB-06: powercap.py's NVML seam)
+# ============================================================
+def test_get_power_limit_w_reads_watts():
+    fake = FakeNvml(power_limit_mw=300_000)
+    p = NVMLProfiler(nvml=fake)
+    assert p.get_power_limit_w() == 300.0
+
+
+def test_get_power_limit_w_none_when_unreadable():
+    fake = FakeNvml(disabled={"power_limit"})
+    p = NVMLProfiler(nvml=fake)
+    assert p.get_power_limit_w() is None
+
+
+def test_set_power_limit_w_converts_watts_to_milliwatts():
+    fake = FakeNvml()
+    p = NVMLProfiler(nvml=fake)
+    p.set_power_limit_w(250.0)
+    assert fake.set_power_limit_calls == [250_000]
+    assert p.get_power_limit_w() == 250.0
+
+
+def test_set_power_limit_w_no_permission_raises_powercap_permission_error():
+    fake = FakeNvml(deny_set_power_limit=True)
+    p = NVMLProfiler(nvml=fake)
+    with pytest.raises(PowerCapPermissionError):
+        p.set_power_limit_w(250.0)
+
+
+def test_set_power_limit_w_other_failure_raises_through_unwrapped():
+    fake = FakeNvml(disabled={"power_limit"})  # a generic (non-permission) NVMLError
+    p = NVMLProfiler(nvml=fake)
+    with pytest.raises(_NvmlError):
+        p.set_power_limit_w(250.0)
+
+
+def test_is_no_permission_error_detects_by_class():
+    fake = FakeNvml()
+    exc = fake.NVMLError_NoPermission("nope")
+    assert prof._is_no_permission_error(fake, exc) is True
+
+
+def test_is_no_permission_error_detects_by_code():
+    class _Nvml:
+        NVML_ERROR_NO_PERMISSION = 3
+
+    class _Exc(Exception):
+        value = 3
+
+    assert prof._is_no_permission_error(_Nvml(), _Exc()) is True
+
+
+def test_is_no_permission_error_falls_back_to_message():
+    class _Nvml:
+        pass
+
+    assert prof._is_no_permission_error(_Nvml(), Exception("Not Privileged: permission denied"))
+    assert not prof._is_no_permission_error(_Nvml(), Exception("unknown failure"))
 
 
 # ============================================================

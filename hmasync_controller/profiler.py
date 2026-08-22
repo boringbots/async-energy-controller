@@ -113,6 +113,16 @@ class ProfilerUnavailable(Exception):
     """A requested backend cannot be constructed on this box (e.g. no pynvml)."""
 
 
+class PowerCapPermissionError(Exception):
+    """`NVMLProfiler.set_power_limit_w` refused for lack of privilege.
+
+    Setting the power-management limit needs root/CAP_SYS_ADMIN (or the vendor
+    equivalent) on most boxes. Raised as its own type, distinct from every other
+    NVMLError, so powercap.py can log "skipped-no-permission" instead of a
+    generic failure — the two need different operator-facing messages.
+    """
+
+
 def _utcnow() -> datetime:
     """Timezone-aware now — no naive datetime ever enters a sample."""
     return datetime.now(timezone.utc)
@@ -376,6 +386,24 @@ def _try(fn: Callable[[], Any]) -> Any:
         return None
 
 
+def _is_no_permission_error(nvml: Any, exc: Exception) -> bool:
+    """Best-effort detection of NVML's "not privileged" error across versions.
+
+    Prefers the library's own `NVMLError_NoPermission` class or
+    `NVML_ERROR_NO_PERMISSION` code when present (real pynvml exposes both via
+    its error registry); falls back to the error text, which is what a test
+    double or an nvidia-ml-py build lacking either exposes.
+    """
+    cls = getattr(nvml, "NVMLError_NoPermission", None)
+    if cls is not None and isinstance(exc, cls):
+        return True
+    no_perm_code = getattr(nvml, "NVML_ERROR_NO_PERMISSION", None)
+    exc_code = getattr(exc, "value", None)
+    if no_perm_code is not None and exc_code == no_perm_code:
+        return True
+    return "permission" in str(exc).lower()
+
+
 def _throttle_fn(nvml) -> Callable | None:
     """The available throttle-reasons getter across nvidia-ml-py versions."""
     return getattr(nvml, "nvmlDeviceGetCurrentClocksThrottleReasons", None) or getattr(
@@ -498,6 +526,36 @@ class NVMLProfiler(_SampledProfiler):
             out["vram_gb"] = round(total / (1024 ** 3), 1)
 
         return out
+
+    def get_power_limit_w(self) -> float | None:
+        """Current power-management limit in watts, or None if unreadable.
+
+        Independent of sampling/capabilities(), like `device_fingerprint` —
+        usable right after construction. Used by powercap.py to capture the
+        prior limit before applying a cap, so it can always be restored.
+        """
+        self._ensure_nvml()
+        mw = _try(lambda: self._nvml.nvmlDeviceGetPowerManagementLimit(self._handle))
+        return mw / 1000.0 if mw is not None else None
+
+    def set_power_limit_w(self, watts: float) -> None:
+        """Set the power-management limit in watts.
+
+        Raises `PowerCapPermissionError` when the driver refuses for lack of
+        privilege (the common case on an unprivileged box), or the driver's
+        own error for anything else (e.g. a value outside
+        `nvmlDeviceGetPowerManagementLimitConstraints`). Deliberately not
+        swallowed here — powercap.py is the layer that decides what a
+        failure means for a job in progress.
+        """
+        self._ensure_nvml()
+        limit_mw = int(round(watts * 1000))
+        try:
+            self._nvml.nvmlDeviceSetPowerManagementLimit(self._handle, limit_mw)
+        except Exception as exc:
+            if _is_no_permission_error(self._nvml, exc):
+                raise PowerCapPermissionError(str(exc)) from exc
+            raise
 
     def capabilities(self) -> set[str]:
         if self._caps is not None:

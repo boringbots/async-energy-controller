@@ -11,7 +11,7 @@ The controller is a client of exactly four concerns on the optimizer API:
 plus owner authentication via the API's `/auth` proxies: the controller
 authenticates as its owner with a JWT + refresh token.
 
-Four routes outside that loop, first reached only by an explicit
+Five routes outside that loop, first reached only by an explicit
 operator/library call rather than the daemon's own schedule-execution logic:
 
     POST /api/v1/advise                  ask for a window without registering (sdk)
@@ -23,6 +23,11 @@ operator/library call rather than the daemon's own schedule-execution logic:
                                           (`register`/`bench register-node`; NOT in
                                           prd.json's documented wire contract — see
                                           register_node's docstring)
+    GET  /api/v1/bench/nodes/{node_hash}/recommended-cap
+                                          poll the server-recommended power cap
+                                          (powercap.PowerCapManager, opt-in via
+                                          APPLY_POWER_CAP; cached, so this rides
+                                          the daemon loop only roughly daily)
 
 **Clean-error contract (load-bearing):** every public method returns an
 `ApiResult` and NEVER raises. Network failures, timeouts, non-2xx responses, and
@@ -413,6 +418,27 @@ class ApiClient:
         if at is not None:
             body["at"] = at
         return self._authed_request("POST", "/api/v1/schedule/ack", json=body)
+
+    def get_recommended_cap(
+        self, node_hash: str, *, tolerance_pct: float = 5.0
+    ) -> ApiResult:
+        """GET /api/v1/bench/nodes/{node_hash}/recommended-cap?tolerance_pct=<pct>.
+
+        Not part of the execution loop by default; invoked by
+        `powercap.PowerCapManager` only when `APPLY_POWER_CAP` is set, cached
+        (refreshed roughly daily) so it never rides the hot path of every job.
+        A recommendation requires the server to already hold flexibility data
+        for this node (from a prior `register_node` + bench submissions); until
+        then this comes back `ok=True` with the recommendation field null —
+        prd.json's GROUND TRUTH (2): "null when no flexibility data — normal,
+        not an error" — so an un-opted-in-to-bench box degrades to "no
+        recommendation, skip" rather than a spurious failure.
+        """
+        return self._authed_request(
+            "GET",
+            f"/api/v1/bench/nodes/{node_hash}/recommended-cap",
+            params={"tolerance_pct": tolerance_pct},
+        )
 
     def submit_bench_bundle(self, bundle: dict[str, Any]) -> ApiResult:
         """POST /api/v1/bench/submissions — submit one measured energy-bench bundle.

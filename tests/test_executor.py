@@ -135,6 +135,7 @@ def make_executor(
     profiler=None,
     adapter_provider=None,
     controller_id="box-1",
+    power_cap=None,
 ):
     client = ApiClient(
         base_url="https://api.hm-async.test",
@@ -152,6 +153,7 @@ def make_executor(
         controller_id=controller_id,
         adapter_provider=adapter_provider,
         run_id_factory=counter_ids(),
+        power_cap=power_cap,
     )
 
 
@@ -545,6 +547,88 @@ def test_extra_drain_raising_never_breaks_a_tick(fake_api, spool):
     assert result.reachable is True
     assert result.drained == 0
     ex.client.close()
+
+
+# ============================================================
+# Power cap bracketing (US-ONB-06): apply before, restore after, always
+# ============================================================
+class FakePowerCap:
+    """Records apply()/restore() order without touching real NVML."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def apply(self):
+        self.calls.append("apply")
+        return "applied"
+
+    def restore(self):
+        self.calls.append("restore")
+        return "restored"
+
+
+def test_power_cap_apply_and_restore_bracket_the_job(fake_api, spool):
+    fake_api.set_schedule(1, placements=[placement("wf-1", iso(2, 0), iso(3, 0))], valid_until=FAR_FUTURE)
+    power_cap = FakePowerCap()
+    ex = make_executor(
+        fake_api, spool, {"wf-1": command_job("wf-1", ["true"])}, power_cap=power_cap
+    )
+
+    ex.tick(now=at(2, 30))
+
+    assert power_cap.calls == ["apply", "restore"]
+
+
+def test_power_cap_not_touched_when_not_wired(fake_api, spool):
+    fake_api.set_schedule(1, placements=[placement("wf-1", iso(2, 0), iso(3, 0))], valid_until=FAR_FUTURE)
+    ex = make_executor(fake_api, spool, {"wf-1": command_job("wf-1", ["true"])})  # power_cap=None
+
+    result = ex.tick(now=at(2, 30))  # must not raise (no power_cap.apply/restore to call)
+
+    assert result.outcomes[0].status == "executed"
+
+
+def test_power_cap_restore_runs_even_when_the_adapter_raises(fake_api, spool):
+    fake_api.set_schedule(1, placements=[placement("wf-1", iso(2, 0), iso(3, 0))], valid_until=FAR_FUTURE)
+    power_cap = FakePowerCap()
+
+    class BoomAdapter(StubAdapter):
+        def run(self, request):
+            raise RuntimeError("gpu driver crashed")
+
+    ex = make_executor(
+        fake_api, spool,
+        {"wf-1": JobDef(framework="stub", request={}, workflow_id="wf-1")},
+        adapter_provider=lambda fw: BoomAdapter(),
+        power_cap=power_cap,
+    )
+
+    result = ex.tick(now=at(2, 30))
+
+    assert power_cap.calls == ["apply", "restore"]
+    # The defensive catch in _execute turned the crash into a failed run, not
+    # an unhandled exception — power_cap.restore() still ran either way.
+    assert result.outcomes[0].exit_status == EXIT_ERROR
+
+
+def test_power_cap_apply_and_restore_raising_never_breaks_a_tick(fake_api, spool):
+    fake_api.set_schedule(1, placements=[placement("wf-1", iso(2, 0), iso(3, 0))], valid_until=FAR_FUTURE)
+
+    class BoomPowerCap:
+        def apply(self):
+            raise RuntimeError("power_cap.apply blew up")
+
+        def restore(self):
+            raise RuntimeError("power_cap.restore blew up")
+
+    ex = make_executor(
+        fake_api, spool, {"wf-1": command_job("wf-1", ["true"])}, power_cap=BoomPowerCap()
+    )
+
+    result = ex.tick(now=at(2, 30))  # must not raise
+
+    assert result.outcomes[0].status == "executed"
+    assert result.outcomes[0].exit_status == EXIT_SUCCESS
 
 
 def test_no_naive_datetimes_in_pushed_record(fake_api, spool):

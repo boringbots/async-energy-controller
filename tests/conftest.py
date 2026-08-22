@@ -63,6 +63,13 @@ class FakeApiServer:
         self.registered_nodes: list[dict] = []
         self.register_node_status: int = 201
         self.register_node_response: dict = {"status": "ok"}
+        # GET /api/v1/bench/nodes/{node_hash}/recommended-cap (US-ONB-06).
+        # Scriptable status/body, same shape as the routes above; defaults to
+        # the "no flexibility data yet" null case, which prd.json's GROUND
+        # TRUTH names as the normal (not-error) response.
+        self.recommended_cap_requests: list[tuple[str, dict]] = []
+        self.recommended_cap_status: int = 200
+        self.recommended_cap_response: dict = {"recommended_cap_w": None}
 
     # --- scripting helpers ------------------------------------------------
 
@@ -127,6 +134,14 @@ class FakeApiServer:
         if path == "/api/v1/bench/nodes" and method == "POST":
             self.registered_nodes.append(body)
             return _json_response(self.register_node_status, self.register_node_response)
+        if (
+            path.startswith("/api/v1/bench/nodes/")
+            and path.endswith("/recommended-cap")
+            and method == "GET"
+        ):
+            node_hash = path.split("/")[5]
+            self.recommended_cap_requests.append((node_hash, dict(request.url.params)))
+            return _json_response(self.recommended_cap_status, self.recommended_cap_response)
         if path == "/api/v1/runs" and method == "POST":
             return self._handle_runs(body)
         if path.startswith("/api/v1/runs/") and path.endswith("/samples") and method == "POST":

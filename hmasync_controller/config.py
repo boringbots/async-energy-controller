@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     # directory, same as every other *_PATH setting.
     NODE_SALT_PATH: str = "hmasync_node_salt"
 
+    # --- power-curve cap (opt-in; a separate consent from BENCH_OPTIN) ---
+    # Off by default. When true AND this box has an NVML-backed GPU, the
+    # executor polls this node's server-recommended power cap
+    # (ApiClient.get_recommended_cap, keyed by node_hash) and applies it via
+    # NVML around each scheduled GPU job, always restoring the prior limit
+    # afterward. A recommendation only exists once this node has contributed
+    # bench data (see NODE_SALT_PATH / BENCH_OPTIN), but requesting one and
+    # acting on it is its own opt-in — this flag does not imply BENCH_OPTIN,
+    # nor does BENCH_OPTIN imply this.
+    APPLY_POWER_CAP: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

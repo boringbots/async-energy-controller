@@ -342,6 +342,45 @@ def test_submit_bench_bundle_network_error_is_clean(make_client, fake_api):
     assert result.transport_error is True
 
 
+# --- get_recommended_cap (US-ONB-06) ----------------------------------------
+
+def test_get_recommended_cap_returns_the_value(make_client, fake_api):
+    fake_api.recommended_cap_response = {"recommended_cap_w": 250.0}
+    client = make_client()
+    result = client.get_recommended_cap("nodehash123", tolerance_pct=5)
+    assert result.ok
+    assert result.data == {"recommended_cap_w": 250.0}
+    node_hash, params = fake_api.recommended_cap_requests[0]
+    assert node_hash == "nodehash123"
+    assert params.get("tolerance_pct") == "5"
+
+
+def test_get_recommended_cap_null_is_success_not_an_error(make_client, fake_api):
+    fake_api.recommended_cap_response = {"recommended_cap_w": None}
+    client = make_client()
+    result = client.get_recommended_cap("nodehash123")
+    assert result.ok
+    assert result.data["recommended_cap_w"] is None
+
+
+def test_get_recommended_cap_is_authenticated(make_client, fake_api):
+    client = make_client()
+    client.get_recommended_cap("nodehash123")
+    request = [
+        r for r in fake_api.requests
+        if r.url.path == "/api/v1/bench/nodes/nodehash123/recommended-cap"
+    ][0]
+    assert request.headers.get("Authorization", "").startswith("Bearer ")
+
+
+def test_get_recommended_cap_network_error_is_clean(make_client, fake_api):
+    client = make_client()
+    fake_api.go_down()
+    result = client.get_recommended_cap("nodehash123")
+    assert not result.ok
+    assert result.transport_error is True
+
+
 # --- clean-error contract -------------------------------------------------
 
 def test_network_error_returns_clean_result_not_raise(make_client, fake_api):

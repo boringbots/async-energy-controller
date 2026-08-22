@@ -252,6 +252,7 @@ class ScheduleExecutor:
         adapter_provider: Callable[[str], Adapter] | None = None,
         run_id_factory: Callable[[], str] | None = None,
         extra_drain: Callable[[], int] | None = None,
+        power_cap: Any = None,
     ):
         self.client = client
         self.reporter = reporter
@@ -263,6 +264,13 @@ class ScheduleExecutor:
         # un-opted-in controller never touches it. Never allowed to break a
         # tick — see `_safe_extra_drain`.
         self._extra_drain = extra_drain
+        # An optional powercap.PowerCapManager (duck-typed as `apply()`/
+        # `restore()` -> str, like `client`/`reporter` above), wired by cli.py
+        # only when APPLY_POWER_CAP is set on a box with an NVML-backed
+        # profiler. None otherwise, so an un-opted-in controller never polls
+        # or touches an NVML power limit. Never allowed to break a job — see
+        # `_safe_power_cap_apply`/`_safe_power_cap_restore`.
+        self.power_cap = power_cap
         # The source as handed in (mapping, watcher, or callable). `_job_source` is
         # the normalized lookup the executor calls; a mapping normalizes into a
         # closure, which would hide `len()` from anything wanting to report the
@@ -393,6 +401,21 @@ class ScheduleExecutor:
             logger.warning("extra_drain callback failed", exc_info=True)
             return 0
 
+    def _safe_power_cap_apply(self) -> None:
+        """Apply the power cap; PowerCapManager already never raises, but a raise
+        here must still never block the job it is meant to be invisible to."""
+        try:
+            self.power_cap.apply()
+        except Exception:
+            logger.warning("power_cap.apply() raised; running uncapped", exc_info=True)
+
+    def _safe_power_cap_restore(self) -> None:
+        """Restore the power cap; a raise here must never mask the job's own result."""
+        try:
+            self.power_cap.restore()
+        except Exception:
+            logger.warning("power_cap.restore() raised", exc_info=True)
+
     # --- scheduling internals --------------------------------------------
 
     def _adopt(self, data: dict[str, Any]) -> None:
@@ -488,8 +511,12 @@ class ScheduleExecutor:
         self._ack(version, "started", wid, now)
 
         # Profile the blocking run (the profiler samples in a background thread so it
-        # never delays execution).
+        # never delays execution). The power cap (if wired) brackets the SAME run:
+        # applied just before, restored in a `finally` so a crash/timeout/raise still
+        # puts the prior limit back — the job's own outcome is decided independently.
         self.profiler.start(run_id)
+        if self.power_cap is not None:
+            self._safe_power_cap_apply()
         try:
             result = adapter.run(self._bounded_request(job, placement, now))
         except AdapterError as exc:
@@ -497,6 +524,9 @@ class ScheduleExecutor:
         except Exception as exc:  # defensive: one bad job must not kill the loop
             logger.exception("adapter.run crashed for workflow %s", wid)
             result = AdapterRunResult(EXIT_ERROR, detail=f"adapter crashed: {exc}")
+        finally:
+            if self.power_cap is not None:
+                self._safe_power_cap_restore()
         telemetry = self.profiler.stop(run_id)
 
         record = self._build_record(job, placement, run_id, fingerprint, result, now, telemetry)

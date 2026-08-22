@@ -18,7 +18,8 @@ from hmasync_controller import cli
 from hmasync_controller.apiclient import ApiClient
 from hmasync_controller.config import Settings
 from hmasync_controller.executor import JobDef, ScheduleExecutor
-from hmasync_controller.profiler import NullProfiler
+from hmasync_controller.powercap import PowerCapManager
+from hmasync_controller.profiler import NullProfiler, NVMLProfiler
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +117,50 @@ def test_build_executor_wires_extra_drain_when_opted_in(tmp_path):
     )
     assert callable(executor._extra_drain)
     assert executor._extra_drain() == 0  # empty bench spool, no network needed
+    executor.client.close()
+
+
+# --- build_executor: power cap wiring (US-ONB-06) --------------------------
+#
+# The autouse `_stub_profiler` fixture above returns a NullProfiler, so by
+# default (no GPU) build_executor must never wire a power cap even when
+# APPLY_POWER_CAP is set — there is nothing to cap.
+
+class _FakeNvmlForCli:
+    def nvmlInit(self):
+        pass
+
+    def nvmlShutdown(self):
+        pass
+
+    def nvmlDeviceGetHandleByIndex(self, index):
+        return f"handle-{index}"
+
+
+def test_build_executor_no_power_cap_when_not_opted_in(tmp_path):
+    executor = cli.build_executor(
+        _settings(tmp_path, APPLY_POWER_CAP=False), job_catalog_path=tmp_path / "x.json"
+    )
+    assert executor.power_cap is None
+    executor.client.close()
+
+
+def test_build_executor_no_power_cap_without_a_gpu(tmp_path):
+    """Opted in, but this box's profiler is Null (no NVML GPU) — nothing to cap."""
+    executor = cli.build_executor(
+        _settings(tmp_path, APPLY_POWER_CAP=True), job_catalog_path=tmp_path / "x.json"
+    )
+    assert executor.power_cap is None
+    executor.client.close()
+
+
+def test_build_executor_wires_power_cap_when_opted_in_with_a_gpu(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "get_profiler", lambda: NVMLProfiler(nvml=_FakeNvmlForCli()))
+    executor = cli.build_executor(
+        _settings(tmp_path, APPLY_POWER_CAP=True, NODE_SALT_PATH=str(tmp_path / "salt")),
+        job_catalog_path=tmp_path / "x.json",
+    )
+    assert isinstance(executor.power_cap, PowerCapManager)
     executor.client.close()
 
 

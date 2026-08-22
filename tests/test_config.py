@@ -121,6 +121,22 @@ def test_node_salt_path_default(monkeypatch):
     assert Settings(_env_file=None).NODE_SALT_PATH == "hmasync_node_salt"
 
 
+# ============================================================
+# Power-curve cap opt-in (US-ONB-06)
+# ============================================================
+
+
+def test_apply_power_cap_default_off(monkeypatch):
+    monkeypatch.delenv("APPLY_POWER_CAP", raising=False)
+    assert Settings(_env_file=None).APPLY_POWER_CAP is False
+
+
+def test_apply_power_cap_comes_from_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLY_POWER_CAP", raising=False)
+    env = _write_env(tmp_path, "APPLY_POWER_CAP=true\n")
+    assert Settings(_env_file=str(env)).APPLY_POWER_CAP is True
+
+
 def test_consent_text_states_what_is_shared_and_not():
     text = BENCH_CONSENT_TEXT.lower()
     # What a submission contains.
