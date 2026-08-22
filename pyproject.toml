@@ -54,3 +54,8 @@ hm-async-controller = "hmasync_controller.cli:main"
 
 [tool.setuptools]
 packages = ["hmasync_controller"]
+
+[tool.setuptools.package-data]
+# The vendored bench-submission schema (hmasync_controller/bench.py) must ship
+# in the built wheel/sdist, not just be readable from an editable checkout.
+hmasync_controller = ["schemas/*.json"]

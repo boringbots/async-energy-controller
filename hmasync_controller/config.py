@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # The energy-bench CLI command installed on this box. Not on PyPI yet, so
     # this stays a plain command name rather than a package pin.
     ENERGY_BENCH_CMD: str = "eb"
+    # Where a bench-bundle submission is queued when the API is unreachable at
+    # send time — same store-and-forward pattern as SPOOL_PATH, kept in its own
+    # file so a stuck bench submission never blocks or mixes into the
+    # run-report spool's drain.
+    BENCH_SPOOL_PATH: str = "hmasync_bench_spool.db"
 
     model_config = SettingsConfigDict(
         env_file=".env",

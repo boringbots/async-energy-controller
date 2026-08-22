@@ -482,6 +482,71 @@ def test_drain_spool_on_reconnect(fake_api, spool):
     assert len(fake_api.runs) == 1  # the spooled run finally reached the API
 
 
+def test_extra_drain_runs_on_reconnect_and_adds_to_drained_count(fake_api, spool):
+    fake_api.set_schedule(1, placements=[], valid_until=FAR_FUTURE)
+    client = ApiClient(
+        base_url="https://api.hm-async.test", email="owner@example.com",
+        password="s3cret", controller_id="box-1", http_client=fake_api.client(),
+    )
+    reporter = RunReporter(client, spool)
+    calls = []
+    ex = ScheduleExecutor(
+        client=client, reporter=reporter, job_source={},
+        profiler=StubProfiler(), controller_id="box-1",
+        extra_drain=lambda: (calls.append(1), 3)[1],
+    )
+
+    result = ex.tick(now=at(1, 0))
+
+    assert calls == [1]
+    assert result.drained == 3
+    ex.client.close()
+
+
+def test_extra_drain_is_not_called_when_unreachable(fake_api, spool):
+    fake_api.go_down()
+    client = ApiClient(
+        base_url="https://api.hm-async.test", email="owner@example.com",
+        password="s3cret", controller_id="box-1", http_client=fake_api.client(),
+    )
+    reporter = RunReporter(client, spool)
+    calls = []
+    ex = ScheduleExecutor(
+        client=client, reporter=reporter, job_source={},
+        profiler=StubProfiler(), controller_id="box-1",
+        extra_drain=lambda: (calls.append(1), 1)[1],
+    )
+
+    ex.tick(now=at(1, 0))
+
+    assert calls == []
+    ex.client.close()
+
+
+def test_extra_drain_raising_never_breaks_a_tick(fake_api, spool):
+    fake_api.set_schedule(1, placements=[], valid_until=FAR_FUTURE)
+    client = ApiClient(
+        base_url="https://api.hm-async.test", email="owner@example.com",
+        password="s3cret", controller_id="box-1", http_client=fake_api.client(),
+    )
+    reporter = RunReporter(client, spool)
+
+    def _boom():
+        raise RuntimeError("bench spool db is locked")
+
+    ex = ScheduleExecutor(
+        client=client, reporter=reporter, job_source={},
+        profiler=StubProfiler(), controller_id="box-1",
+        extra_drain=_boom,
+    )
+
+    result = ex.tick(now=at(1, 0))  # must not raise
+
+    assert result.reachable is True
+    assert result.drained == 0
+    ex.client.close()
+
+
 def test_no_naive_datetimes_in_pushed_record(fake_api, spool):
     fake_api.set_schedule(1, placements=[placement("wf-1", iso(2, 0), iso(3, 0))], valid_until=FAR_FUTURE)
     ex = make_executor(fake_api, spool, {"wf-1": command_job("wf-1", ["true"])})

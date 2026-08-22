@@ -50,6 +50,7 @@ from hmasync_controller.adapters import (
     normalize_command,
 )
 from hmasync_controller.apiclient import ApiClient
+from hmasync_controller.bench import drain_bench_spool, submit_bundle_file
 from hmasync_controller.config import (
     BENCH_CONSENT_TEXT,
     Settings,
@@ -344,12 +345,22 @@ def build_executor(
         CatalogWatcher(catalog_path) if watch_catalog else load_job_catalog(catalog_path)
     )
 
+    # Bench-bundle retries ride the SAME reconnect trigger as the run-report
+    # spool (see ScheduleExecutor.tick). Only wired when opted in, so an
+    # un-opted-in controller never opens the bench spool file or attempts a
+    # bench-related request.
+    extra_drain = None
+    if settings.BENCH_OPTIN:
+        bench_spool = Spool(settings.BENCH_SPOOL_PATH)
+        extra_drain = lambda: drain_bench_spool(client, bench_spool).drained  # noqa: E731
+
     return ScheduleExecutor(
         client=client,
         reporter=reporter,
         job_source=job_source,
         profiler=get_profiler(),
         controller_id=controller_id,
+        extra_drain=extra_drain,
     )
 
 
@@ -762,7 +773,52 @@ def run_bench(
             f"Opted out — BENCH_OPTIN=false written to {env_path}. "
             "No further benchmark data will be sent."
         )
-    return 2, "usage: async-energy-controller bench {opt-in,opt-out,quick}"
+    return 2, "usage: async-energy-controller bench {opt-in,opt-out,quick,submit}"
+
+
+# ============================================================
+# bench submit — validate, redact-check, POST one bundle by hand
+# ============================================================
+#
+# The seam `run_bench_quick`'s `submit_fn` calls into (see below) and the
+# manual `bench submit <bundle.json>` command are the SAME function: whether
+# a bundle came from this run of `bench quick` or an old one sitting on disk,
+# submitting it goes through identical validation, redaction, and spool-on-
+# outage handling (bench.submit_bundle_file).
+
+
+def run_bench_submit(
+    settings: Settings, bundle_path: str, *, client: ApiClient | None = None
+) -> tuple[int, str]:
+    """`bench submit <bundle.json>` — validate, redact-check, and POST one bundle.
+
+    Requires BENCH_OPTIN — the same single gate that governs every other
+    bench-related upload — so this command cannot send data the operator has
+    not consented to share, even when invoked by hand.
+    """
+    if not settings.BENCH_OPTIN:
+        return 2, "not opted in — run `bench opt-in` first; nothing was sent."
+    if not settings.HM_ASYNC_API_URL:
+        return 2, "HM_ASYNC_API_URL is not set — nothing to connect to. See .env.example."
+
+    owned = client is None
+    client = client or _client_from(settings)
+    bench_spool = Spool(settings.BENCH_SPOOL_PATH)
+    try:
+        result = submit_bundle_file(client, bench_spool, bundle_path)
+    finally:
+        bench_spool.close()
+        if owned:
+            client.close()
+
+    # A spooled outcome is a normal, expected result of the offline-resilience
+    # design (the bundle is durably queued, not lost) — not an operator error.
+    return (0 if (result.ok or result.spooled) else 1), result.message
+
+
+def _bench_submit_fn(bundle_path: str, settings: Settings) -> tuple[int, str]:
+    """The `submit_fn` seam `run_bench_quick` hands a fresh bundle off to."""
+    return run_bench_submit(settings, bundle_path)
 
 
 # ============================================================
@@ -992,8 +1048,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     reg.add_argument("--log-level", default=argparse.SUPPRESS, help="Logging level (default: INFO).")
 
-    # `bench` gathers opt-in/opt-out now; later stories add `quick`, `submit`,
-    # and `register-node` as siblings under the same subparsers object.
+    # `bench` gathers opt-in/opt-out/quick/submit; a later story adds
+    # `register-node` as a sibling under the same subparsers object.
     bench = sub.add_parser(
         "bench",
         help="Opt in/out of contributing benchmark data to Async Energy.",
@@ -1012,6 +1068,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     bench_sub.add_parser(
         "quick",
         help="Run the ~25-minute energy-bench quick suite and write a bundle.",
+    )
+    bench_submit = bench_sub.add_parser(
+        "submit",
+        help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
+    )
+    bench_submit.add_argument(
+        "bundle_path",
+        metavar="BUNDLE_JSON",
+        help="Path to a bundle JSON file, e.g. one written by `bench quick`.",
     )
 
     return parser.parse_args(argv)
@@ -1033,8 +1098,11 @@ def main(argv: list[str] | None = None) -> int:
         return code
 
     if getattr(args, "subcommand", None) == "bench":
-        if getattr(args, "bench_subcommand", None) == "quick":
-            code, message = run_bench_quick(settings)
+        bench_sub = getattr(args, "bench_subcommand", None)
+        if bench_sub == "quick":
+            code, message = run_bench_quick(settings, submit_fn=_bench_submit_fn)
+        elif bench_sub == "submit":
+            code, message = run_bench_submit(settings, args.bundle_path)
         else:
             code, message = run_bench(args)
         print(message)

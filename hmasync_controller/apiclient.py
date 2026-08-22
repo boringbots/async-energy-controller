@@ -11,11 +11,14 @@ The controller is a client of exactly four concerns on the optimizer API:
 plus owner authentication via the API's `/auth` proxies: the controller
 authenticates as its owner with a JWT + refresh token.
 
-Two routes outside that loop, reached only by an explicit operator/library call
-and never by the running daemon:
+Three routes outside that loop, first reached only by an explicit
+operator/library call rather than the daemon's own schedule-execution logic:
 
     POST /api/v1/advise                  ask for a window without registering (sdk)
     POST /api/v1/workflows               register a workload (`register`)
+    POST /api/v1/bench/submissions       submit a bench bundle (`bench submit`/`quick`;
+                                          a queued one may later retry on the daemon's
+                                          tick cadence via bench.drain_bench_spool)
 
 **Clean-error contract (load-bearing):** every public method returns an
 `ApiResult` and NEVER raises. Network failures, timeouts, non-2xx responses, and
@@ -381,6 +384,18 @@ class ApiClient:
         if at is not None:
             body["at"] = at
         return self._authed_request("POST", "/api/v1/schedule/ack", json=body)
+
+    def submit_bench_bundle(self, bundle: dict[str, Any]) -> ApiResult:
+        """POST /api/v1/bench/submissions — submit one measured energy-bench bundle.
+
+        Not part of the execution loop; invoked by `bench submit` / `bench
+        quick`'s opt-in hand-off (cli.py / bench.py), never by the running
+        daemon directly. A quarantined submission is still a 2xx (accepted,
+        held for operator review) — quarantine is a server-side review state,
+        not a client-visible failure, so no special-casing is needed beyond
+        the normal 2xx/4xx split `_parse_response` already does.
+        """
+        return self._authed_request("POST", "/api/v1/bench/submissions", json=bundle)
 
 
 def _parse_response(resp: httpx.Response) -> ApiResult:

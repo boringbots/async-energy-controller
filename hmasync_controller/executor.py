@@ -251,11 +251,18 @@ class ScheduleExecutor:
         now_fn: Callable[[], datetime] | None = None,
         adapter_provider: Callable[[str], Adapter] | None = None,
         run_id_factory: Callable[[], str] | None = None,
+        extra_drain: Callable[[], int] | None = None,
     ):
         self.client = client
         self.reporter = reporter
         self.profiler = profiler or get_profiler()
         self.controller_id = controller_id
+        # An optional second drain, run on the SAME reconnect trigger as the
+        # run-report spool (reachable again → flush). Wired by cli.py to the
+        # bench-bundle spool when bench opt-in is on; None otherwise, so an
+        # un-opted-in controller never touches it. Never allowed to break a
+        # tick — see `_safe_extra_drain`.
+        self._extra_drain = extra_drain
         # The source as handed in (mapping, watcher, or callable). `_job_source` is
         # the normalized lookup the executor calls; a mapping normalizes into a
         # closure, which would hide `len()` from anything wanting to report the
@@ -309,6 +316,8 @@ class ScheduleExecutor:
         if reachable:
             # Back in contact — flush anything spooled during the outage.
             drained = self.reporter.drain_spool().drained
+            if self._extra_drain is not None:
+                drained += self._safe_extra_drain()
 
         if self._current is None:
             return TickResult(self._version, adopted, "idle", [], drained, reachable)
@@ -375,6 +384,14 @@ class ScheduleExecutor:
                     close()
                 except Exception:  # pragma: no cover - defensive cleanup
                     pass
+
+    def _safe_extra_drain(self) -> int:
+        """Run the injected extra_drain callback; a raise must never take a tick down."""
+        try:
+            return int(self._extra_drain())
+        except Exception:
+            logger.warning("extra_drain callback failed", exc_info=True)
+            return 0
 
     # --- scheduling internals --------------------------------------------
 

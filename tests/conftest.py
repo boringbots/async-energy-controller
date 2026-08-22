@@ -51,6 +51,12 @@ class FakeApiServer:
         self.workflows_response: dict = {"id": "wf-created"}
         self.workflows_status: int = 201
         self.created_workflows: list[dict] = []
+        # POST /api/v1/bench/submissions (US-ONB-04). Scriptable status/body so
+        # tests can simulate a quarantined-but-accepted (2xx) response as well
+        # as an outright refusal, the same way workflows_status/response works.
+        self.bench_submissions: list[dict] = []
+        self.bench_submission_status: int = 201
+        self.bench_submission_response: dict = {"status": "accepted"}
 
     # --- scripting helpers ------------------------------------------------
 
@@ -109,6 +115,9 @@ class FakeApiServer:
         if path == "/api/v1/workflows" and method == "POST":
             self.created_workflows.append(body)
             return _json_response(self.workflows_status, self.workflows_response)
+        if path == "/api/v1/bench/submissions" and method == "POST":
+            self.bench_submissions.append(body)
+            return _json_response(self.bench_submission_status, self.bench_submission_response)
         if path == "/api/v1/runs" and method == "POST":
             return self._handle_runs(body)
         if path.startswith("/api/v1/runs/") and path.endswith("/samples") and method == "POST":

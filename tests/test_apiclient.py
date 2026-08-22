@@ -229,6 +229,49 @@ def test_create_workflow_network_error_is_clean(make_client, fake_api):
     assert not result.ok and result.transport_error is True
 
 
+# --- submit_bench_bundle (US-ONB-04) ---------------------------------------
+
+def test_submit_bench_bundle_success(make_client, fake_api):
+    client = make_client()
+    result = client.submit_bench_bundle({"schema_version": "1"})
+    assert result.ok
+    assert fake_api.bench_submissions == [{"schema_version": "1"}]
+
+
+def test_submit_bench_bundle_quarantined_2xx_is_success(make_client, fake_api):
+    fake_api.bench_submission_status = 202
+    fake_api.bench_submission_response = {"status": "quarantined"}
+    client = make_client()
+    result = client.submit_bench_bundle({"schema_version": "1"})
+    assert result.ok
+    assert result.status_code == 202
+    assert result.data == {"status": "quarantined"}
+
+
+def test_submit_bench_bundle_is_authenticated(make_client, fake_api):
+    client = make_client()
+    client.submit_bench_bundle({"schema_version": "1"})
+    request = [r for r in fake_api.requests if r.url.path == "/api/v1/bench/submissions"][0]
+    assert request.headers.get("Authorization", "").startswith("Bearer ")
+
+
+def test_submit_bench_bundle_refusal_surfaces_the_detail(make_client, fake_api):
+    fake_api.bench_submission_status = 422
+    fake_api.bench_submission_response = {"detail": "implausible metrics"}
+    client = make_client()
+    result = client.submit_bench_bundle({"schema_version": "1"})
+    assert not result.ok
+    assert result.error == "implausible metrics"
+
+
+def test_submit_bench_bundle_network_error_is_clean(make_client, fake_api):
+    client = make_client()
+    fake_api.go_down()
+    result = client.submit_bench_bundle({"schema_version": "1"})
+    assert not result.ok
+    assert result.transport_error is True
+
+
 # --- clean-error contract -------------------------------------------------
 
 def test_network_error_returns_clean_result_not_raise(make_client, fake_api):

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hmasync_controller import cli
+from hmasync_controller.apiclient import ApiClient
 from hmasync_controller.config import Settings
 from hmasync_controller.executor import JobDef, ScheduleExecutor
 from hmasync_controller.profiler import NullProfiler
@@ -100,7 +101,21 @@ def test_build_executor_wires_catalog_as_job_source(tmp_path):
 def test_build_executor_uses_resolved_controller_id(tmp_path):
     executor = cli.build_executor(_settings(tmp_path, CONTROLLER_ID="box-42"), job_catalog_path=tmp_path / "x.json")
     assert executor.controller_id == "box-42"
-    assert executor.client.controller_id == "box-42"
+
+
+def test_build_executor_no_extra_drain_when_not_opted_in(tmp_path):
+    executor = cli.build_executor(_settings(tmp_path, BENCH_OPTIN=False), job_catalog_path=tmp_path / "x.json")
+    assert executor._extra_drain is None
+    executor.client.close()
+
+
+def test_build_executor_wires_extra_drain_when_opted_in(tmp_path):
+    executor = cli.build_executor(
+        _settings(tmp_path, BENCH_OPTIN=True, BENCH_SPOOL_PATH=str(tmp_path / "bench_spool.db")),
+        job_catalog_path=tmp_path / "x.json",
+    )
+    assert callable(executor._extra_drain)
+    assert executor._extra_drain() == 0  # empty bench spool, no network needed
     executor.client.close()
 
 
@@ -1049,8 +1064,116 @@ def test_main_dispatches_bench_quick(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(
-        cli, "run_bench_quick", lambda settings: (0, "bundle written to x.json")
+        cli,
+        "run_bench_quick",
+        lambda settings, submit_fn=None: (0, "bundle written to x.json"),
     )
 
     assert cli.main(["bench", "quick"]) == 0
     assert "bundle written" in capsys.readouterr().out
+
+
+def test_main_wires_bench_submit_fn_into_bench_quick(tmp_path, monkeypatch, capsys):
+    """`main()` hands `run_bench_quick` a real submit_fn (bound to run_bench_submit)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    seen = {}
+
+    def fake_run_bench_quick(settings, submit_fn=None):
+        seen["submit_fn"] = submit_fn
+        return 0, "bundle written to x.json"
+
+    monkeypatch.setattr(cli, "run_bench_quick", fake_run_bench_quick)
+    assert cli.main(["bench", "quick"]) == 0
+    assert seen["submit_fn"] is cli._bench_submit_fn
+
+
+# ============================================================
+# bench submit (US-ONB-04)
+# ============================================================
+
+
+def test_bench_submit_subcommand_parses():
+    args = cli._parse_args(["bench", "submit", "bundle.json"])
+    assert args.subcommand == "bench"
+    assert args.bench_subcommand == "submit"
+    assert args.bundle_path == "bundle.json"
+
+
+def test_run_bench_submit_requires_optin(tmp_path):
+    settings = _settings(tmp_path, BENCH_OPTIN=False)
+    code, message = cli.run_bench_submit(settings, str(tmp_path / "bundle.json"))
+    assert code == 2
+    assert "opted in" in message
+
+
+def test_run_bench_submit_requires_api_url(tmp_path):
+    settings = _settings(tmp_path, BENCH_OPTIN=True, HM_ASYNC_API_URL="")
+    code, message = cli.run_bench_submit(settings, str(tmp_path / "bundle.json"))
+    assert code == 2
+    assert "HM_ASYNC_API_URL" in message
+
+
+def test_run_bench_submit_success(tmp_path, fake_api, monkeypatch):
+    bundle = {
+        "schema_version": "1", "generated_at": "2026-08-22T00:00:00Z",
+        "nodes": [], "runs": [], "grades": [], "load_profiles": [],
+    }
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps(bundle))
+    settings = _settings(
+        tmp_path,
+        BENCH_OPTIN=True,
+        HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_SPOOL_PATH=str(tmp_path / "bench_spool.db"),
+    )
+    client = ApiClient(
+        base_url="https://api.hm-async.test", email="owner@example.com",
+        password="s3cret", http_client=fake_api.client(),
+    )
+
+    code, message = cli.run_bench_submit(settings, str(bundle_path), client=client)
+
+    assert code == 0
+    assert "submitted" in message
+    assert len(fake_api.bench_submissions) == 1
+
+
+def test_run_bench_submit_spooled_on_outage_is_not_a_hard_failure(tmp_path, fake_api):
+    bundle = {
+        "schema_version": "1", "generated_at": "2026-08-22T00:00:00Z",
+        "nodes": [], "runs": [], "grades": [], "load_profiles": [],
+    }
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps(bundle))
+    fake_api.go_down()
+    settings = _settings(
+        tmp_path,
+        BENCH_OPTIN=True,
+        HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_SPOOL_PATH=str(tmp_path / "bench_spool.db"),
+    )
+    client = ApiClient(
+        base_url="https://api.hm-async.test", email="owner@example.com",
+        password="s3cret", http_client=fake_api.client(),
+    )
+
+    code, message = cli.run_bench_submit(settings, str(bundle_path), client=client)
+
+    assert code == 0
+    assert "spooled" in message
+
+
+def test_main_dispatches_bench_submit(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    seen = {}
+
+    def fake_run_bench_submit(settings, bundle_path):
+        seen["bundle_path"] = bundle_path
+        return 0, "submitted bundle.json"
+
+    monkeypatch.setattr(cli, "run_bench_submit", fake_run_bench_submit)
+    assert cli.main(["bench", "submit", "bundle.json"]) == 0
+    assert seen["bundle_path"] == "bundle.json"
+    assert "submitted" in capsys.readouterr().out
