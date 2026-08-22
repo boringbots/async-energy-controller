@@ -371,6 +371,80 @@ What you give up versus the daemon: nothing retries your job if it fails, and
 nothing runs it if your process is not alive. Pick the shape that matches who is
 holding the clock.
 
+## Optimize + contribute
+
+Everything above runs on the price curve alone. There is a second, entirely
+optional loop: contribute measured benchmark data, and the optimizer starts
+giving *your* box better answers — a cold-start estimate for a workflow it has
+never seen run here yet, and (if you opt into it separately) a power cap tuned
+to your actual hardware instead of its nameplate rating.
+
+It is off by default and stays off until you type `bench opt-in`:
+
+```bash
+async-energy-controller bench opt-in
+```
+
+That command prints the full consent text before it writes anything, and there
+is no interactive `y/n` — safe to read on a box with no TTY before deciding
+whether to run it for real. What it shares, verbatim:
+
+```
+Opting in shares, per benchmark submission:
+  - a hardware fingerprint: GPU model name, VRAM (GB), driver version, CPU
+    model, and RAM (GB)
+  - software versions: this controller and energy-bench
+  - benchmark metrics: energy (Wh), duration, throughput, and related numbers
+    produced by the suite
+
+It never shares prompts, commands, workflow definitions, or any workflow data.
+It never shares GPU UUIDs, serial numbers, MAC addresses, hostnames, or Home
+Assistant entity ids — this box is identified only by a salted local hash,
+generated once and never transmitted in raw form.
+
+Data license: submitted results feed Async Energy's shared routing-table and
+cold-start-prediction aggregates. Opting out stops future submissions; it does
+not withdraw data already submitted.
+```
+
+`bench opt-out` reverts it at any time — nothing further is sent, though data
+already submitted is not withdrawn.
+
+### Running the suite — `bench quick`
+
+```bash
+async-energy-controller bench quick
+```
+
+This runs [energy-bench](https://async.energy)'s quick suite through your
+existing install (`eb quick --share-out <bundle>`) in the foreground, streaming
+its own progress — unmeasured here, but the suite's own name for it is the
+~25-minute tier: **Tier C, no smart plug required**, using GPU-reported power
+instead of a wall meter. If opted in, the bundle it writes is submitted
+automatically once the run finishes; if not, you get a bundle file on disk and
+nothing leaves the box. `bench submit <bundle.json>` sends one by hand, e.g. a
+bundle from an earlier run that was never opted in at the time.
+
+A submission is validated and checked against the redaction denylist locally
+before anything is sent, and refused rather than sent if either check fails. If
+the API is unreachable when a submission is ready, it spools to disk and goes
+out on the controller's normal reconnect cadence — the same offline-safe
+pattern used for run reports.
+
+### What you get back
+
+- **Cold-start priors.** `register --bench-gpu-class rtx4090
+  --bench-model-size-class 7b --bench-quant int4` (all optional) tags a
+  workflow with a hardware/model class so the optimizer can estimate its energy
+  cost from the shared benchmark pool before this box has ever run it, instead
+  of guessing from nameplate wattage alone.
+- **A tuned power cap.** Set `APPLY_POWER_CAP=true` in `.env` (a separate
+  opt-in from `bench opt-in` — one shares data, the other acts on a
+  recommendation) and, once this node has a recommendation on file, the
+  controller applies it via NVML around each scheduled GPU job and always
+  restores the prior limit afterward, logging what it did. No recommendation
+  yet, or no permission to set one, is never an error — the job runs uncapped.
+
 ## How energy gets measured
 
 The profiler samples the GPU at 1 Hz for the length of every run and records
