@@ -48,8 +48,9 @@ class _Util:
 
 
 class _Mem:
-    def __init__(self, used):
+    def __init__(self, used, total=None):
         self.used = used
+        self.total = total if total is not None else used
 
 
 class FakeNvml:
@@ -77,15 +78,18 @@ class FakeNvml:
         util_gpu=80,
         util_mem=40,
         mem_used=4 * 1024 * 1024 * 1024,  # 4 GiB in bytes
+        mem_total=24 * 1024 * 1024 * 1024,  # 24 GiB in bytes
         temp_c=70,
         sm_clock=1900,
         energy_mj=None,  # list of successive counter reads (mJ)
         throttle_mask=0,
         disabled=(),  # channel names to make raise NVMLError
+        gpu_name="NVIDIA GeForce RTX 4090",
+        driver_version="550.90.07",
     ):
         self.power_mw = power_mw
         self.util = _Util(util_gpu, util_mem)
-        self.mem = _Mem(mem_used)
+        self.mem = _Mem(mem_used, mem_total)
         self.temp_c = temp_c
         self.sm_clock = sm_clock
         self.energy_mj = list(energy_mj) if energy_mj is not None else None
@@ -95,6 +99,8 @@ class FakeNvml:
         self.init_calls = 0
         self.shutdown_calls = 0
         self.count = 1
+        self.gpu_name = gpu_name
+        self.driver_version = driver_version
 
     def _guard(self, name):
         if name in self.disabled:
@@ -143,6 +149,14 @@ class FakeNvml:
     def nvmlDeviceGetCurrentClocksThrottleReasons(self, h):
         self._guard("throttle")
         return self.throttle_mask
+
+    def nvmlDeviceGetName(self, h):
+        self._guard("name")
+        return self.gpu_name
+
+    def nvmlSystemGetDriverVersion(self):
+        self._guard("driver_version")
+        return self.driver_version
 
 
 class _FakePath:
@@ -312,6 +326,41 @@ def test_nvml_throttle_decode_idle_only():
     p._ensure_nvml()
     s = p._read_gpu_sample()
     assert s["throttle_reasons"] == "gpuidle"  # rollup treats this as NOT throttled
+
+
+# ============================================================
+# NVML device_fingerprint (US-ONB-05: gpu_name/driver_version/vram_gb)
+# ============================================================
+def test_nvml_device_fingerprint_reads_name_driver_vram():
+    fake = FakeNvml(gpu_name="NVIDIA GeForce RTX 4090", driver_version="550.90.07",
+                     mem_total=24 * 1024 * 1024 * 1024)
+    p = NVMLProfiler(nvml=fake)
+    fp = p.device_fingerprint()
+    assert fp["gpu_name"] == "NVIDIA GeForce RTX 4090"
+    assert fp["driver_version"] == "550.90.07"
+    assert fp["vram_gb"] == 24.0
+
+
+def test_nvml_device_fingerprint_decodes_bytes():
+    fake = FakeNvml(gpu_name=b"NVIDIA GeForce RTX 4090", driver_version=b"550.90.07")
+    p = NVMLProfiler(nvml=fake)
+    fp = p.device_fingerprint()
+    assert fp["gpu_name"] == "NVIDIA GeForce RTX 4090"
+    assert fp["driver_version"] == "550.90.07"
+
+
+def test_nvml_device_fingerprint_never_includes_identity_fields():
+    fake = FakeNvml()
+    p = NVMLProfiler(nvml=fake)
+    fp = p.device_fingerprint()
+    assert set(fp) <= {"gpu_name", "driver_version", "vram_gb"}
+
+
+def test_nvml_device_fingerprint_degrades_per_channel():
+    fake = FakeNvml(disabled={"name", "driver_version", "memory"})
+    p = NVMLProfiler(nvml=fake)
+    fp = p.device_fingerprint()
+    assert fp == {}
 
 
 # ============================================================

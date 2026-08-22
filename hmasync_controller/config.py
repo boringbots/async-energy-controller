@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # file so a stuck bench submission never blocks or mixes into the
     # run-report spool's drain.
     BENCH_SPOOL_PATH: str = "hmasync_bench_spool.db"
+    # This box's random local identity seed (see fingerprint.load_or_create_salt).
+    # Generated once, persisted here, and never transmitted — only its hash
+    # (node_hash) is. Relative paths resolve against the controller's working
+    # directory, same as every other *_PATH setting.
+    NODE_SALT_PATH: str = "hmasync_node_salt"
 
     model_config = SettingsConfigDict(
         env_file=".env",

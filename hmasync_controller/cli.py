@@ -50,7 +50,7 @@ from hmasync_controller.adapters import (
     normalize_command,
 )
 from hmasync_controller.apiclient import ApiClient
-from hmasync_controller.bench import drain_bench_spool, submit_bundle_file
+from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.config import (
     BENCH_CONSENT_TEXT,
     Settings,
@@ -58,7 +58,8 @@ from hmasync_controller.config import (
     set_bench_optin,
 )
 from hmasync_controller.executor import ScheduleExecutor
-from hmasync_controller.profiler import get_profiler
+from hmasync_controller.fingerprint import collect_fingerprint
+from hmasync_controller.profiler import Profiler, get_profiler
 from hmasync_controller.reporter import RunReporter
 from hmasync_controller.spool import Spool
 
@@ -711,6 +712,9 @@ def run_register(
             recurrence=args.recurrence,
             nameplate_watts=args.nameplate_watts,
             enabled=False if args.disabled else None,
+            bench_gpu_class=args.bench_gpu_class,
+            bench_model_size_class=args.bench_model_size_class,
+            bench_quant=args.bench_quant,
         )
         if not result.ok:
             return 1, f"could not register {args.name!r}: {result.error}"
@@ -731,6 +735,18 @@ def run_register(
                 f"registered {args.name!r} as {workflow_id}, but the catalog was NOT "
                 f"updated: {exc}\nAdd it by hand so the two do not drift."
             )
+
+        # Best-effort: opted-in, so also upsert this box's hardware fingerprint.
+        # A hiccup here must never undo a successful workflow registration,
+        # which is the primary action of this command — hence the note rather
+        # than a non-zero exit.
+        node_note = ""
+        if settings.BENCH_OPTIN:
+            _node_code, node_message = _register_node(client, get_profiler(), settings)
+            node_note = (
+                f"\n{node_message}" if _node_code == 0
+                else f"\nnode fingerprint not sent: {node_message}"
+            )
     finally:
         if owned:
             client.close()
@@ -742,7 +758,7 @@ def run_register(
         f"  framework    {args.framework}\n"
         "Run `--check` to confirm it lands in the next schedule.\n"
         "Tip: contribute ~25 minutes of benchmark data to improve your own "
-        "scheduling — run `bench opt-in` to see what is shared."
+        f"scheduling — run `bench opt-in` to see what is shared.{node_note}"
     )
 
 
@@ -773,7 +789,58 @@ def run_bench(
             f"Opted out — BENCH_OPTIN=false written to {env_path}. "
             "No further benchmark data will be sent."
         )
-    return 2, "usage: async-energy-controller bench {opt-in,opt-out,quick,submit}"
+    return 2, "usage: async-energy-controller bench {opt-in,opt-out,register-node,quick,submit}"
+
+
+# ============================================================
+# bench register-node — send this box's hardware-CLASS fingerprint
+# ============================================================
+#
+# Distinct from `bench submit`: this sends no benchmark data, just a hardware
+# fingerprint (GPU model/driver/VRAM via NVML when present, CPU model + RAM
+# from /proc, and a salted node_hash — see fingerprint.py) so the server can
+# upsert a bench_nodes row and give this box bench-prior cold-start estimates.
+# Reached two ways: the standalone `bench register-node` command, and as a
+# best-effort side effect of a successful `register` when BENCH_OPTIN is set
+# (see run_register below) — both funnel through `_register_node`.
+
+
+def _register_node(client: ApiClient, profiler: Profiler, settings: Settings) -> tuple[int, str]:
+    """Collect + send the fingerprint. Refuses locally if it ever carries a
+    denylisted key (should never happen — collect_fingerprint only gathers
+    gpu/cpu/ram class fields — but this is the same defense-in-depth bench.py
+    applies to a submission bundle before it goes out)."""
+    fingerprint = collect_fingerprint(profiler, settings.NODE_SALT_PATH)
+    leaked = denylisted_keys(fingerprint)
+    if leaked:
+        return 1, "refusing to send — denylisted key(s) present: " + ", ".join(leaked)
+
+    result = client.register_node(fingerprint)
+    if result.ok:
+        return 0, f"registered node {fingerprint['node_hash']}"
+    return 1, f"could not register node: {result.error}"
+
+
+def run_bench_register_node(
+    settings: Settings, *, client: ApiClient | None = None, profiler: Profiler | None = None
+) -> tuple[int, str]:
+    """`bench register-node` — send this box's hardware-class fingerprint.
+
+    Requires BENCH_OPTIN, the same single gate as every other bench upload —
+    the fingerprint is one of the things BENCH_CONSENT_TEXT names as shared.
+    """
+    if not settings.BENCH_OPTIN:
+        return 2, "not opted in — run `bench opt-in` first; nothing was sent."
+    if not settings.HM_ASYNC_API_URL:
+        return 2, "HM_ASYNC_API_URL is not set — nothing to connect to. See .env.example."
+
+    owned = client is None
+    client = client or _client_from(settings)
+    try:
+        return _register_node(client, profiler or get_profiler(), settings)
+    finally:
+        if owned:
+            client.close()
 
 
 # ============================================================
@@ -1031,6 +1098,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=float,
         help="Rated draw of the hardware, used to predict cost before any run is measured.",
     )
+    # Bench-prior hint fields (the api's migration 008): optional classification
+    # metadata the operator types explicitly, unlocking bench-prior cold-start
+    # estimates for this workflow. No BENCH_OPTIN gate — distinct from the
+    # hardware fingerprint `bench register-node` sends.
+    reg.add_argument(
+        "--bench-gpu-class",
+        help="GPU class hint for bench-prior cold-start estimates, e.g. 'rtx4090'.",
+    )
+    reg.add_argument(
+        "--bench-model-size-class",
+        help="Model-size class hint, e.g. '7b' or '70b'.",
+    )
+    reg.add_argument(
+        "--bench-quant",
+        help="Quantization hint, e.g. 'int4' or 'fp16'.",
+    )
     # SUPPRESS, not a default value: a subparser writes its defaults into the SAME
     # namespace and would otherwise silently overwrite the parent's — so
     # `--job-catalog x.json register …` would quietly write to jobs.json instead.
@@ -1048,8 +1131,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     reg.add_argument("--log-level", default=argparse.SUPPRESS, help="Logging level (default: INFO).")
 
-    # `bench` gathers opt-in/opt-out/quick/submit; a later story adds
-    # `register-node` as a sibling under the same subparsers object.
+    # `bench` gathers opt-in/opt-out/register-node/quick/submit.
     bench = sub.add_parser(
         "bench",
         help="Opt in/out of contributing benchmark data to Async Energy.",
@@ -1065,6 +1147,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Opt in to sharing benchmark data. Prints what is shared first.",
     )
     bench_sub.add_parser("opt-out", help="Opt out of sharing benchmark data.")
+    bench_sub.add_parser(
+        "register-node",
+        help=(
+            "Send this box's hardware-class fingerprint (GPU/CPU/RAM, no "
+            "identifiers) so the server can give it bench-prior cold-start "
+            "estimates. Requires prior `bench opt-in`."
+        ),
+    )
     bench_sub.add_parser(
         "quick",
         help="Run the ~25-minute energy-bench quick suite and write a bundle.",
@@ -1103,6 +1193,8 @@ def main(argv: list[str] | None = None) -> int:
             code, message = run_bench_quick(settings, submit_fn=_bench_submit_fn)
         elif bench_sub == "submit":
             code, message = run_bench_submit(settings, args.bundle_path)
+        elif bench_sub == "register-node":
+            code, message = run_bench_register_node(settings)
         else:
             code, message = run_bench(args)
         print(message)

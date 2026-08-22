@@ -229,6 +229,76 @@ def test_create_workflow_network_error_is_clean(make_client, fake_api):
     assert not result.ok and result.transport_error is True
 
 
+def test_create_workflow_sends_bench_prior_hints(make_client, fake_api):
+    """US-ONB-05: bench-prior hint fields (the api's migration 008) pass through."""
+    client = make_client()
+    client.create_workflow(
+        name="nightly",
+        bench_gpu_class="rtx4090",
+        bench_model_size_class="7b",
+        bench_quant="int4",
+    )
+    body = fake_api.created_workflows[0]
+    assert body["bench_gpu_class"] == "rtx4090"
+    assert body["bench_model_size_class"] == "7b"
+    assert body["bench_quant"] == "int4"
+
+
+def test_create_workflow_omits_bench_prior_hints_when_unset(make_client, fake_api):
+    client = make_client()
+    client.create_workflow(name="nightly")
+    body = fake_api.created_workflows[0]
+    assert "bench_gpu_class" not in body
+    assert "bench_model_size_class" not in body
+    assert "bench_quant" not in body
+
+
+# --- register_node (US-ONB-05) ---------------------------------------------
+
+
+def test_register_node_success(make_client, fake_api):
+    client = make_client()
+    result = client.register_node({"node_hash": "abc123", "cpu_model": "AMD Ryzen 9"})
+    assert result.ok
+    assert fake_api.registered_nodes == [{"node_hash": "abc123", "cpu_model": "AMD Ryzen 9"}]
+
+
+def test_register_node_is_authenticated(make_client, fake_api):
+    client = make_client()
+    client.register_node({"node_hash": "abc123"})
+    request = [r for r in fake_api.requests if r.url.path == "/api/v1/bench/nodes"][0]
+    assert request.headers.get("Authorization", "").startswith("Bearer ")
+
+
+def test_register_node_refusal_surfaces_the_detail(make_client, fake_api):
+    fake_api.register_node_status = 422
+    fake_api.register_node_response = {"detail": "node_hash required"}
+    client = make_client()
+    result = client.register_node({})
+    assert not result.ok
+    assert result.error == "node_hash required"
+
+
+def test_register_node_route_not_yet_deployed_is_a_clean_failure(make_client, fake_api):
+    """The route is not in prd.json's documented wire contract. A 404 (the API
+    side has not added it yet) must come back as an ordinary ApiResult failure
+    — never raise, never be treated as success — same as any other refusal."""
+    fake_api.register_node_status = 404
+    fake_api.register_node_response = {"detail": "not found"}
+    client = make_client()
+    result = client.register_node({"node_hash": "abc123"})
+    assert not result.ok
+    assert result.status_code == 404
+
+
+def test_register_node_network_error_is_clean(make_client, fake_api):
+    client = make_client()
+    fake_api.go_down()
+    result = client.register_node({"node_hash": "abc123"})
+    assert not result.ok
+    assert result.transport_error is True
+
+
 # --- submit_bench_bundle (US-ONB-04) ---------------------------------------
 
 def test_submit_bench_bundle_success(make_client, fake_api):

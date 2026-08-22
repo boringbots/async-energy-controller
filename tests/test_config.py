@@ -116,6 +116,11 @@ def test_bench_optin_comes_from_env_file(tmp_path, monkeypatch):
     assert Settings(_env_file=str(env)).BENCH_OPTIN is True
 
 
+def test_node_salt_path_default(monkeypatch):
+    monkeypatch.delenv("NODE_SALT_PATH", raising=False)
+    assert Settings(_env_file=None).NODE_SALT_PATH == "hmasync_node_salt"
+
+
 def test_consent_text_states_what_is_shared_and_not():
     text = BENCH_CONSENT_TEXT.lower()
     # What a submission contains.

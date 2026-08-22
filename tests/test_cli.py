@@ -811,6 +811,109 @@ def test_register_success_points_at_bench_optin(tmp_path, make_client, fake_api)
     assert "bench opt-in" in message
 
 
+def test_register_sends_bench_prior_hint_flags(tmp_path, make_client, fake_api):
+    """US-ONB-05: --bench-gpu-class/--bench-model-size-class/--bench-quant pass
+    through to the workflow payload (the api's bench-prior hint fields)."""
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(
+        name="nightly", command="true", job_catalog=str(tmp_path / "j.json"),
+        bench_gpu_class="rtx4090", bench_model_size_class="7b", bench_quant="int4",
+    )
+    cli.run_register(
+        _settings(tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test"),
+        args, client=make_client(),
+    )
+    body = fake_api.created_workflows[0]
+    assert body["bench_gpu_class"] == "rtx4090"
+    assert body["bench_model_size_class"] == "7b"
+    assert body["bench_quant"] == "int4"
+
+
+def test_register_omits_bench_prior_hints_when_not_passed(tmp_path, make_client, fake_api):
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+    cli.run_register(
+        _settings(tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test"),
+        args, client=make_client(),
+    )
+    body = fake_api.created_workflows[0]
+    assert "bench_gpu_class" not in body
+    assert "bench_model_size_class" not in body
+    assert "bench_quant" not in body
+
+
+def test_register_sends_node_fingerprint_when_opted_in(tmp_path, make_client, fake_api):
+    """US-ONB-05: a successful register ALSO upserts the node fingerprint, but
+    only when the operator has opted into bench (the fingerprint is one of the
+    things BENCH_CONSENT_TEXT names as shared)."""
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+    settings = _settings(
+        tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_OPTIN=True, NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, message = cli.run_register(settings, args, client=make_client())
+
+    assert code == 0
+    assert len(fake_api.registered_nodes) == 1
+    assert "node_hash" in fake_api.registered_nodes[0]
+    assert "registered node" in message
+
+
+def test_register_does_not_send_node_fingerprint_without_optin(tmp_path, make_client, fake_api):
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+    settings = _settings(
+        tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_OPTIN=False, NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, message = cli.run_register(settings, args, client=make_client())
+
+    assert code == 0
+    assert fake_api.registered_nodes == []
+    assert not (tmp_path / "salt").exists()
+
+
+def test_register_node_fingerprint_failure_does_not_fail_the_register(tmp_path, make_client, fake_api):
+    """Registering the workflow is the primary action; a node-fingerprint
+    hiccup is secondary and must never undo it."""
+    fake_api.workflows_response = {"id": "wf-new"}
+    fake_api.register_node_status = 500
+    fake_api.register_node_response = {"detail": "server error"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+    settings = _settings(
+        tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_OPTIN=True, NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, message = cli.run_register(settings, args, client=make_client())
+
+    # code == 0: the workflow registration itself still succeeded.
+    assert code == 0
+    assert "node fingerprint not sent" in message
+    assert (tmp_path / "j.json").exists()
+
+
+def test_register_node_fingerprint_has_no_denylisted_keys(tmp_path, make_client, fake_api):
+    """The explicit denylist assertion the PRD's acceptance criteria calls
+    for, exercised through the real register path (not a hand-built dict)."""
+    from hmasync_controller.bench import denylisted_keys
+
+    fake_api.workflows_response = {"id": "wf-new"}
+    args = _register_args(name="nightly", command="true", job_catalog=str(tmp_path / "j.json"))
+    settings = _settings(
+        tmp_path, HM_ASYNC_API_URL="https://api.hm-async.test",
+        BENCH_OPTIN=True, NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    cli.run_register(settings, args, client=make_client())
+
+    assert len(fake_api.registered_nodes) == 1
+    assert denylisted_keys(fake_api.registered_nodes[0]) == []
+
+
 def test_register_surfaces_a_400_naming_the_bad_field(tmp_path, make_client, fake_api):
     """The API refuses an unparseable deadline; that message is the useful one."""
     fake_api.workflows_status = 400
@@ -1177,3 +1280,93 @@ def test_main_dispatches_bench_submit(tmp_path, monkeypatch, capsys):
     assert cli.main(["bench", "submit", "bundle.json"]) == 0
     assert seen["bundle_path"] == "bundle.json"
     assert "submitted" in capsys.readouterr().out
+
+
+# ============================================================
+# bench register-node (US-ONB-05)
+# ============================================================
+#
+# Sends this box's hardware-class fingerprint (GPU/CPU/RAM + a salted
+# node_hash — never an identifier) so the server can give it bench-prior
+# cold-start estimates. Gated on BENCH_OPTIN, same as every other bench
+# upload; NullProfiler is passed explicitly so these never probe a real GPU.
+
+
+def test_bench_register_node_subcommand_parses():
+    args = cli._parse_args(["bench", "register-node"])
+    assert args.subcommand == "bench"
+    assert args.bench_subcommand == "register-node"
+
+
+def test_run_bench_register_node_requires_optin(tmp_path):
+    settings = _settings(tmp_path, BENCH_OPTIN=False)
+    code, message = cli.run_bench_register_node(settings)
+    assert code == 2
+    assert "opted in" in message
+
+
+def test_run_bench_register_node_requires_api_url(tmp_path):
+    settings = _settings(tmp_path, BENCH_OPTIN=True, HM_ASYNC_API_URL="")
+    code, message = cli.run_bench_register_node(settings)
+    assert code == 2
+    assert "HM_ASYNC_API_URL" in message
+
+
+def test_run_bench_register_node_success(tmp_path, make_client, fake_api):
+    settings = _settings(
+        tmp_path, BENCH_OPTIN=True, HM_ASYNC_API_URL="https://api.hm-async.test",
+        NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, message = cli.run_bench_register_node(
+        settings, client=make_client(), profiler=NullProfiler()
+    )
+
+    assert code == 0
+    assert "registered node" in message
+    assert len(fake_api.registered_nodes) == 1
+    assert "node_hash" in fake_api.registered_nodes[0]
+    assert (tmp_path / "salt").exists()
+
+
+def test_run_bench_register_node_no_gpu_degrades_gracefully(tmp_path, make_client, fake_api):
+    settings = _settings(
+        tmp_path, BENCH_OPTIN=True, HM_ASYNC_API_URL="https://api.hm-async.test",
+        NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, _message = cli.run_bench_register_node(
+        settings, client=make_client(), profiler=NullProfiler()
+    )
+
+    assert code == 0
+    payload = fake_api.registered_nodes[0]
+    assert "gpu_name" not in payload
+    assert "driver_version" not in payload
+    assert "vram_gb" not in payload
+
+
+def test_run_bench_register_node_api_refusal_is_reported(tmp_path, make_client, fake_api):
+    fake_api.register_node_status = 500
+    fake_api.register_node_response = {"detail": "server error"}
+    settings = _settings(
+        tmp_path, BENCH_OPTIN=True, HM_ASYNC_API_URL="https://api.hm-async.test",
+        NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+
+    code, message = cli.run_bench_register_node(
+        settings, client=make_client(), profiler=NullProfiler()
+    )
+
+    assert code == 1
+    assert "could not register node" in message
+
+
+def test_main_dispatches_bench_register_node(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(
+        cli, "run_bench_register_node", lambda settings: (0, "registered node abc123")
+    )
+    assert cli.main(["bench", "register-node"]) == 0
+    assert "registered node abc123" in capsys.readouterr().out

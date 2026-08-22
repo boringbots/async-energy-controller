@@ -57,6 +57,12 @@ class FakeApiServer:
         self.bench_submissions: list[dict] = []
         self.bench_submission_status: int = 201
         self.bench_submission_response: dict = {"status": "accepted"}
+        # POST /api/v1/bench/nodes (US-ONB-05) — same scriptable shape as the
+        # two above, so a test can simulate an API that has not added this
+        # route yet (404) as easily as a normal accept.
+        self.registered_nodes: list[dict] = []
+        self.register_node_status: int = 201
+        self.register_node_response: dict = {"status": "ok"}
 
     # --- scripting helpers ------------------------------------------------
 
@@ -118,6 +124,9 @@ class FakeApiServer:
         if path == "/api/v1/bench/submissions" and method == "POST":
             self.bench_submissions.append(body)
             return _json_response(self.bench_submission_status, self.bench_submission_response)
+        if path == "/api/v1/bench/nodes" and method == "POST":
+            self.registered_nodes.append(body)
+            return _json_response(self.register_node_status, self.register_node_response)
         if path == "/api/v1/runs" and method == "POST":
             return self._handle_runs(body)
         if path.startswith("/api/v1/runs/") and path.endswith("/samples") and method == "POST":

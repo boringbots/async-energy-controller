@@ -11,7 +11,7 @@ The controller is a client of exactly four concerns on the optimizer API:
 plus owner authentication via the API's `/auth` proxies: the controller
 authenticates as its owner with a JWT + refresh token.
 
-Three routes outside that loop, first reached only by an explicit
+Four routes outside that loop, first reached only by an explicit
 operator/library call rather than the daemon's own schedule-execution logic:
 
     POST /api/v1/advise                  ask for a window without registering (sdk)
@@ -19,6 +19,10 @@ operator/library call rather than the daemon's own schedule-execution logic:
     POST /api/v1/bench/submissions       submit a bench bundle (`bench submit`/`quick`;
                                           a queued one may later retry on the daemon's
                                           tick cadence via bench.drain_bench_spool)
+    POST /api/v1/bench/nodes             upsert this box's hardware fingerprint
+                                          (`register`/`bench register-node`; NOT in
+                                          prd.json's documented wire contract — see
+                                          register_node's docstring)
 
 **Clean-error contract (load-bearing):** every public method returns an
 `ApiResult` and NEVER raises. Network failures, timeouts, non-2xx responses, and
@@ -300,6 +304,9 @@ class ApiClient:
         recurrence: str | None = None,
         nameplate_watts: float | None = None,
         enabled: bool | None = None,
+        bench_gpu_class: str | None = None,
+        bench_model_size_class: str | None = None,
+        bench_quant: str | None = None,
     ) -> ApiResult:
         """POST /api/v1/workflows — register a workload and get its id back (201).
 
@@ -317,6 +324,12 @@ class ApiClient:
         `request` defaults to omitted. What this box runs is described by the local
         job catalog, and the controller does not upload it unasked; callers who
         want the API to hold a copy pass it explicitly.
+
+        `bench_gpu_class`/`bench_model_size_class`/`bench_quant` are optional
+        classification hints (e.g. "rtx4090"/"7b"/"int4") the API's migration 008
+        accepts on a workflow to unlock bench-prior cold-start estimates. They are
+        metadata the operator types explicitly at registration time, distinct from
+        the hardware fingerprint `register_node` sends — no BENCH_OPTIN gate.
         """
         body: dict[str, Any] = {"name": name, "framework": framework}
         optional = {
@@ -327,9 +340,25 @@ class ApiClient:
             "recurrence": recurrence,
             "nameplate_watts": nameplate_watts,
             "enabled": enabled,
+            "bench_gpu_class": bench_gpu_class,
+            "bench_model_size_class": bench_model_size_class,
+            "bench_quant": bench_quant,
         }
         body.update({k: v for k, v in optional.items() if v is not None})
         return self._authed_request("POST", "/api/v1/workflows", json=body)
+
+    def register_node(self, fingerprint: dict[str, Any]) -> ApiResult:
+        """POST /api/v1/bench/nodes — upsert this box's hardware-class fingerprint.
+
+        Not in prd.json's GROUND TRUTH wire-contract list (which names
+        /bench/submissions, /bench/routing-table, and
+        /bench/nodes/{node_hash}/recommended-cap but no node-registration
+        route) — named to match that existing `/api/v1/bench/nodes` resource
+        family. If the API side has not added this route yet, this comes back
+        as an ordinary ApiResult failure (e.g. 404), same clean-error contract
+        as every other call — never assumed to have succeeded.
+        """
+        return self._authed_request("POST", "/api/v1/bench/nodes", json=fingerprint)
 
     def push_run(self, record: Any) -> ApiResult:
         """POST /api/v1/runs — push one run record (or a batch: pass a list).

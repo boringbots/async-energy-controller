@@ -472,6 +472,33 @@ class NVMLProfiler(_SampledProfiler):
             )
         )
 
+    def device_fingerprint(self) -> dict[str, Any]:
+        """GPU model name, driver version, and total VRAM (GB) via THIS handle.
+
+        Independent of sampling/capabilities() — usable right after construction,
+        no run in progress. Each field degrades on its own (a getter this
+        driver/GPU doesn't support is simply omitted), matching every other
+        per-channel contract in this module: never a fabricated value.
+        """
+        self._ensure_nvml()
+        nv, h = self._nvml, self._handle
+        out: dict[str, Any] = {}
+
+        name = _try(lambda: nv.nvmlDeviceGetName(h))
+        if name:
+            out["gpu_name"] = name.decode() if isinstance(name, bytes) else name
+
+        driver = _try(lambda: nv.nvmlSystemGetDriverVersion())
+        if driver:
+            out["driver_version"] = driver.decode() if isinstance(driver, bytes) else driver
+
+        mem = _try(lambda: nv.nvmlDeviceGetMemoryInfo(h))
+        total = getattr(mem, "total", None) if mem is not None else None
+        if total is not None:
+            out["vram_gb"] = round(total / (1024 ** 3), 1)
+
+        return out
+
     def capabilities(self) -> set[str]:
         if self._caps is not None:
             return set(self._caps)
