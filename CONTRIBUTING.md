@@ -3,6 +3,9 @@
 Bug reports and adapter contributions are welcome. The controller is
 intentionally small — that is a feature, and changes that grow it need a reason.
 
+This repository is the canonical controller source. There is no other
+controller tree to sync against; all controller work happens here.
+
 ## Ground rules
 
 **The controller never optimizes.** It executes a schedule and reports what
