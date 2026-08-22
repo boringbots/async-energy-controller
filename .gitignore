@@ -46,3 +46,13 @@ PUBLISHING.md
 # scratch space for anything not meant to ship:
 /private/
 /scratch/
+
+# Local agent/loop scaffolding — never commit (this repo is public)
+CLAUDE.md
+prd.json
+progress.txt
+ralph.sh
+.ralph-logs/
+.ralph-archive/
+.venv-linux/
+tasks/
