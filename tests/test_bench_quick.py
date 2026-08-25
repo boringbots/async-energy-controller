@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT, OllamaModelNotPulledError
+from hmasync_controller.bench.metrics import THROTTLE_HW_THERMAL
 from hmasync_controller.bench.metrics.models import InferenceResult
 from hmasync_controller.bench.quick import (
     CALIBRATE_MAX_SWEEP_POINTS,
@@ -48,6 +49,7 @@ from hmasync_controller.bench.quick import (
 )
 from hmasync_controller.bench.sampler import TelemetrySample
 from hmasync_controller.bench.tasks import TaskItem
+from hmasync_controller.bench.thermal import SustainedThermalThrottleError
 from hmasync_controller.bench.vllm_client import VLLMUnavailableError
 
 
@@ -316,6 +318,125 @@ class TestRunQuickTask:
             run = _run(run_quick_task(vllm_client, _BareTelemetry(), "some-model", "fake_task", 1))
         assert run.rapl_max_energy_range_uj is None
         assert run.rapl_dram_max_energy_range_uj is None
+
+
+def _throttled_samples(n: int, throttle_reasons: int) -> list[TelemetrySample]:
+    return [
+        TelemetrySample(
+            ts=1000.0 + i, gpu_power_w=200.0, gpu_util_pct=90.0,
+            gpu_mem_used_mib=8000.0, gpu_temp_c=90.0, gpu_throttle_reasons=throttle_reasons,
+        )
+        for i in range(n)
+    ]
+
+
+class _ThermalTelemetry(_FakeTelemetry):
+    """`_FakeTelemetry` plus a live `current_samples()` -- proves
+    `run_quick_task` (US-MERGE-07) is actually wired to `bench.thermal`, not
+    just that `thermal.py`'s own functions work in isolation
+    (`tests/test_bench_thermal.py`)."""
+
+    def __init__(self, samples_fn):
+        super().__init__(_samples(3))
+        self._samples_fn = samples_fn
+        self.stop_called = False
+
+    def current_samples(self):
+        return self._samples_fn()
+
+    async def stop(self):
+        self.stop_called = True
+        return await super().stop()
+
+
+class TestRunQuickTaskThermalReaction:
+    """`HW_THERMAL_SUSTAINED_S`/`THERMAL_PAUSE_POLL_S`/`THERMAL_PAUSE_TIMEOUT_S`
+    are monkeypatched to millisecond-scale values so these tests exercise the
+    real pause/abort control flow without actually waiting 10s/300s --
+    `maybe_pause_for_thermal_throttle` resolves them from
+    `hmasync_controller.bench.thermal`'s module globals at call time
+    specifically so this works without threading overrides through
+    `run_quick_task`'s own signature."""
+
+    def test_not_sustained_never_pauses(self, monkeypatch):
+        import hmasync_controller.bench.thermal as thermal_module
+
+        monkeypatch.setattr(thermal_module, "HW_THERMAL_SUSTAINED_S", 1.0)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_POLL_S", 0.01)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_TIMEOUT_S", 0.05)
+
+        items = _make_items(1)
+        task = _FakeTask(items)
+        # Never throttled -- consecutive_hw_thermal_seconds is always 0.0.
+        telemetry = _ThermalTelemetry(lambda: _throttled_samples(5, 0))
+        vllm_client = AsyncMock()
+        vllm_client.chat = AsyncMock(return_value=(_inference_result(), "42"))
+        with patch("hmasync_controller.bench.quick.load_task", return_value=task):
+            run = _run(run_quick_task(vllm_client, telemetry, "some-model", "fake_task", 1))
+        assert run.n_items == 1
+
+    def test_pauses_between_items_then_resumes_once_hw_thermal_clears(self, monkeypatch):
+        import hmasync_controller.bench.thermal as thermal_module
+
+        monkeypatch.setattr(thermal_module, "HW_THERMAL_SUSTAINED_S", 1.0)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_POLL_S", 0.01)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_TIMEOUT_S", 1.0)
+
+        items = _make_items(2)
+        task = _FakeTask(items)
+        poll_count = {"n": 0}
+
+        def samples_fn():
+            poll_count["n"] += 1
+            # Sustained hw_thermal for the first 2 reads (the trigger check
+            # after item 1, plus one poll), clear from the 3rd read onward.
+            if poll_count["n"] <= 2:
+                return _throttled_samples(20, THROTTLE_HW_THERMAL)
+            return _throttled_samples(19, THROTTLE_HW_THERMAL) + [
+                TelemetrySample(
+                    ts=1019.0, gpu_power_w=200.0, gpu_util_pct=90.0,
+                    gpu_mem_used_mib=8000.0, gpu_temp_c=70.0, gpu_throttle_reasons=0,
+                )
+            ]
+
+        telemetry = _ThermalTelemetry(samples_fn)
+        vllm_client = AsyncMock()
+        vllm_client.chat = AsyncMock(
+            side_effect=[(_inference_result(), "42"), (_inference_result(), "42")]
+        )
+        with patch("hmasync_controller.bench.quick.load_task", return_value=task):
+            run = _run(run_quick_task(vllm_client, telemetry, "some-model", "fake_task", 2))
+
+        assert run.n_items == 2
+        assert [r.correct for r in run.inference_results] == [True, True]
+        # Trigger check + >=1 poll before it cleared, then the 2nd item's own
+        # (by-then-clear) check -- proves the pause loop actually ran, not a
+        # single lucky read.
+        assert poll_count["n"] >= 3
+
+    def test_aborts_task_after_timeout_with_stated_reason(self, monkeypatch):
+        import hmasync_controller.bench.thermal as thermal_module
+
+        monkeypatch.setattr(thermal_module, "HW_THERMAL_SUSTAINED_S", 1.0)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_POLL_S", 0.01)
+        monkeypatch.setattr(thermal_module, "THERMAL_PAUSE_TIMEOUT_S", 0.03)
+
+        items = _make_items(1)
+        task = _FakeTask(items)
+        telemetry = _ThermalTelemetry(lambda: _throttled_samples(20, THROTTLE_HW_THERMAL))
+        vllm_client = AsyncMock()
+        vllm_client.chat = AsyncMock(return_value=(_inference_result(), "42"))
+
+        with patch("hmasync_controller.bench.quick.load_task", return_value=task):
+            with pytest.raises(SustainedThermalThrottleError) as exc_info:
+                _run(run_quick_task(vllm_client, telemetry, "some-model", "fake_task", 1))
+
+        message = str(exc_info.value)
+        assert "hw_thermal" in message
+        assert "did not clear" in message
+        # The abort still unwinds through `run_quick_task`'s
+        # `finally: telemetry_samples = await telemetry.stop()`.
+        assert telemetry.stop_called
 
 
 class TestRunPowerSweep:

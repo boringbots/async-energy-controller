@@ -165,6 +165,15 @@ class LocalNvmlSampler:
         samples, self._samples = self._samples, []
         return samples
 
+    def current_samples(self) -> list[TelemetrySample]:
+        """A snapshot of samples collected so far in the current
+        `start()`/`stop()` window, without stopping the background loop.
+
+        `bench.thermal`'s item-loop thermal reaction (US-MERGE-07) needs to
+        read live samples mid-run to notice sustained throttling; `stop()`
+        alone only surfaces the trace after the run is already over."""
+        return list(self._samples)
+
     async def gpu_info(self) -> dict[str, object]:
         h = self._ensure_handle()
         pynvml = self._pynvml

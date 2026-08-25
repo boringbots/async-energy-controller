@@ -549,6 +549,7 @@ by name.
 - **[async.energy](https://async.energy)** — what this is and why
 - **[Quickstart](https://async.energy/quickstart/)** — account → workload → this controller
 - **[How it works](https://async.energy/how-it-works/)** — the cost model and the optimizer
+- **[Hardware safety](HARDWARE-SAFETY.md)** — every call that touches your GPU, its bounds, and its restore path
 - **[Issues](https://github.com/boringbots/async-energy-controller/issues)** — bugs and questions
 
 ## License

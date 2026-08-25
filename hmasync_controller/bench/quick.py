@@ -48,6 +48,18 @@ energy is also not read locally -- `LocalNvmlSampler` (bench.sampler) has no
 local RAPL reader, so `rapl_max_energy_range_uj`/`_dram_...` always resolve
 to `None` for a run measured here (see `run_quick_task`'s note on reading
 those attributes defensively).
+
+## Hardware safety: thermal reaction (US-MERGE-07)
+
+`run_quick_task`'s item loop checks `bench.thermal.maybe_pause_for_thermal_throttle`
+between items (never mid-request): a sustained `hw_thermal` NVML bit pauses
+until it clears or raises `SustainedThermalThrottleError` past a timeout,
+which this function lets propagate -- callers already treat "one task
+raised" as "skip it, keep the rest of the suite" (see `_run_bench_suite`),
+so an aborted task never silently reports a throttled-through result. Full
+rationale, thresholds, and why `hw_thermal` specifically (not the broader
+thermal mask): `bench/thermal.py`'s module docstring and
+`HARDWARE-SAFETY.md`.
 """
 
 from __future__ import annotations
@@ -74,6 +86,10 @@ from hmasync_controller.bench.metrics import (
 )
 from hmasync_controller.bench.sampler import LocalNvmlSampler, NvmlUnavailableError, TelemetrySample
 from hmasync_controller.bench.tasks import load_task
+from hmasync_controller.bench.thermal import (
+    SustainedThermalThrottleError,
+    maybe_pause_for_thermal_throttle,
+)
 from hmasync_controller.bench.vllm_client import VLLMClient, VLLMTimeoutError, VLLMUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -103,6 +119,7 @@ __all__ = [
     "QuickModel",
     "QuickSuiteResult",
     "QuickTaskRun",
+    "SustainedThermalThrottleError",
     "detect_engine",
     "resolve_quick_model",
     "run_calibrate_suite",
@@ -384,6 +401,14 @@ async def run_quick_task(
             result.item_id = item.item_id
             result.correct = task.score(text, item)
             inference_results.append(result)
+
+            # Thermal reaction (US-MERGE-07): between items, never mid-request.
+            # `current_samples` is read defensively -- a telemetry double that
+            # doesn't define it (most test fakes) simply isn't monitored,
+            # same convention as the rapl_*_range_uj getattr reads below.
+            get_current_samples = getattr(telemetry, "current_samples", None)
+            if get_current_samples is not None:
+                await maybe_pause_for_thermal_throttle(get_current_samples)
     finally:
         telemetry_samples = await telemetry.stop()
 
