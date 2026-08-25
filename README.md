@@ -66,7 +66,11 @@ pip install -e.   # installs and runs fine with no GPU driver — energy stays n
 ```
 
 This puts `async-energy-controller` on your PATH (and `hm-async-controller` as a
-permanent alias, so older installs and unit files keep working).
+permanent alias, so older installs and unit files keep working). The base
+install above is also everything the benchmark suite needs — `bench quick` and
+`bench calibrate` (below, under "Optimize + contribute") run with no extra
+flag and no second package to install; there is no separate `energy-bench`
+download.
 
 ## Configure
 
@@ -392,7 +396,7 @@ whether to run it for real. What it shares, verbatim:
 Opting in shares, per benchmark submission:
   - a hardware fingerprint: GPU model name, VRAM (GB), driver version, CPU
     model, and RAM (GB)
-  - software versions: this controller and energy-bench
+  - software versions: this controller (the bench suite runs inside it)
   - benchmark metrics: energy (Wh), duration, throughput, and related numbers
     produced by the suite
 

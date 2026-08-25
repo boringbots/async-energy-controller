@@ -125,7 +125,7 @@ BENCH_CONSENT_TEXT = """\
 Opting in shares, per benchmark submission:
   - a hardware fingerprint: GPU model name, VRAM (GB), driver version, CPU
     model, and RAM (GB)
-  - software versions: this controller and energy-bench
+  - software versions: this controller (the bench suite runs inside it)
   - benchmark metrics: energy (Wh), duration, throughput, and related numbers
     produced by the suite
 
