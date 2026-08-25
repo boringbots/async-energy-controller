@@ -35,8 +35,35 @@ def _minimal_bundle(**overrides) -> dict:
 # --- validate_bundle --------------------------------------------------
 
 
-def test_minimal_bundle_is_valid():
+def test_minimal_v1_bundle_is_valid():
     assert bench.validate_bundle(_minimal_bundle()) == []
+
+
+def test_minimal_v2_bundle_is_valid():
+    # v2's additions (CI fields, total_joules_cpu_dram, baselines) are all
+    # optional per the schema, so a bundle carrying nothing but the bumped
+    # schema_version — no baselines array, no new run fields — must still
+    # validate exactly like a v1 bundle does.
+    assert bench.validate_bundle(_minimal_bundle(schema_version="2")) == []
+
+
+def test_v2_bundle_with_baselines_is_valid():
+    bundle = _minimal_bundle(
+        schema_version="2",
+        baselines=[
+            {
+                "node_hash": "abc123",
+                "kind": "loaded",
+                "model": "some-model",
+                "mean_gpu_w": 45.0,
+                "peak_gpu_w": 60.0,
+                "gpu_mem_used_mib": 8192.0,
+                "duration_s": 120.0,
+                "driver_version": "550.1",
+            }
+        ],
+    )
+    assert bench.validate_bundle(bundle) == []
 
 
 def test_missing_required_field_is_reported():
@@ -46,8 +73,8 @@ def test_missing_required_field_is_reported():
     assert any("runs" in e for e in errors)
 
 
-def test_wrong_schema_version_const_is_reported():
-    errors = bench.validate_bundle(_minimal_bundle(schema_version="2"))
+def test_unknown_schema_version_is_rejected():
+    errors = bench.validate_bundle(_minimal_bundle(schema_version="3"))
     assert any("schema_version" in e for e in errors)
 
 
