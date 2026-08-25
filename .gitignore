@@ -55,4 +55,8 @@ ralph.sh
 # every .ralph-* file and directory: logs, archive, and the last-branch marker
 .ralph-*
 .venv-linux/
-tasks/
+# Root-level PRD-markdown scratch dir only — anchored so it does NOT also
+# match hmasync_controller/bench/tasks/, the real shipped task-registry code
+# (US-MERGE-01 discrepancy: this pattern used to be bare `tasks/`, which is
+# unanchored and would have silently hidden that package from git).
+/tasks/

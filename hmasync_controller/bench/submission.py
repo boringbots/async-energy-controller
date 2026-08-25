@@ -1,11 +1,11 @@
 """
-bench — validate, redact-check, and store-and-forward a bench submission bundle.
+submission — validate, redact-check, and store-and-forward a bench submission bundle.
 
-`bench quick` (cli.py) writes a bundle file via the operator's installed
-energy-bench (`eb quick --share-out <bundle>.json`). This module is what stands
-between that file and the wire: it validates the bundle against the vendored
-copy of energy-bench's submission schema, refuses anything carrying a
-denylisted key (defense in depth alongside the schema's own
+`bench quick` (cli.py) writes a bundle file (US-MERGE-04 replaces the old
+energy-bench subprocess hand-off with an in-process call). This module is
+what stands between that file and the wire: it validates the bundle against
+the vendored copy of energy-bench's submission schema, refuses anything
+carrying a denylisted key (defense in depth alongside the schema's own
 `additionalProperties: false`), and — on a network failure — spools it using
 the same pattern as spool.py, in its own SQLite file so a stuck bench
 submission never blocks or mixes into the run-report spool.
@@ -15,6 +15,12 @@ client (see pyproject's dependency comment); the JSON-Schema subset the
 vendored file actually uses (type/properties/required/additionalProperties/
 items/$ref/const/enum) is small enough to walk directly against the schema
 loaded from disk, so validation can never drift from what is vendored.
+
+Formerly `hmasync_controller/bench.py`; moved under `bench/` (US-MERGE-01)
+when that name became a package (tasks/, and the rest of the ported
+benchmark suite). Its public names are re-exported from `bench/__init__.py`
+so every existing `from hmasync_controller import bench; bench.<name>` /
+`from hmasync_controller.bench import <name>` call site is unaffected.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from hmasync_controller.spool import Spool
 # hand (`cp` from the energy-bench repo) and checked for drift by
 # tests/test_bench.py, which skips when no local energy-bench checkout is
 # present to compare against.
-SCHEMA_PATH = Path(__file__).parent / "schemas" / "bench_submission.schema.json"
+SCHEMA_PATH = Path(__file__).parent.parent / "schemas" / "bench_submission.schema.json"
 
 # Key names that must never appear anywhere in a submission, checked
 # independently of schema validation — a redaction net that still catches a

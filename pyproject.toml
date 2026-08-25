@@ -27,6 +27,33 @@ dependencies = [
     "httpx==0.28.1",
     "pydantic==2.13.3",
     "pydantic-settings==2.14.0",
+    # Benchmark datasets (hmasync_controller/bench/tasks/) are pulled as
+    # parquet straight from the HF hub via huggingface_hub + pyarrow (US-MERGE-01,
+    # ported from energy-bench's tasks/base.py). The full `datasets` package is
+    # avoided on purpose: it drags in pandas/dill/multiprocess for no benefit here.
+    "huggingface-hub==1.28.0",
+    "pyarrow==25.0.1",
+    # IFEval's language:response_language / change_case:english_* checkers
+    # (bench/tasks/ifeval_checks.py) need language detection; profiles are
+    # bundled in the wheel so detect() needs no network call at score time.
+    "langdetect==1.0.9",
+    # longctx_summary scores ROUGE-L F1 against GovReport reference summaries
+    # (bench/tasks/longctx_summary.py). Works fully offline with
+    # use_stemmer=False (regex tokenizer, no nltk data download).
+    #
+    # DISCREPANCY vs. tasks/prd-controller-merge.md's GROUND TRUTH (recorded
+    # at US-MERGE-01): that doc lists only huggingface-hub/langdetect as new
+    # base deps and states "numpy does NOT [join]" because only the excluded
+    # humaneval sandbox needs it. That claim did not account for this
+    # dependency: rouge-score==0.1.2 itself requires absl-py, nltk, numpy and
+    # six. Since longctx_summary is one of the 9 tasks the GROUND TRUTH
+    # explicitly names as moving, rouge-score (and its transitive numpy) has
+    # to come along. This will make US-MERGE-06's dependency-audit acceptance
+    # criterion ("exactly httpx, pydantic, pydantic-settings, pynvml, pyarrow,
+    # huggingface-hub, langdetect") false as literally written — that story
+    # needs to either widen the expected set or find a numpy-free ROUGE-L
+    # scorer before asserting it.
+    "rouge-score==0.1.2",
 ]
 
 [project.urls]
@@ -53,7 +80,11 @@ async-energy-controller = "hmasync_controller.cli:main"
 hm-async-controller = "hmasync_controller.cli:main"
 
 [tool.setuptools]
-packages = ["hmasync_controller"]
+packages = [
+    "hmasync_controller",
+    "hmasync_controller.bench",
+    "hmasync_controller.bench.tasks",
+]
 
 [tool.setuptools.package-data]
 # The vendored bench-submission schema (hmasync_controller/bench.py) must ship
