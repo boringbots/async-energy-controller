@@ -93,6 +93,7 @@ hm-async-controller = "hmasync_controller.cli:main"
 packages = [
     "hmasync_controller",
     "hmasync_controller.bench",
+    "hmasync_controller.bench.metrics",
     "hmasync_controller.bench.tasks",
 ]
 

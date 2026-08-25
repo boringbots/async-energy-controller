@@ -21,6 +21,12 @@ graceful null) and an OpenAI-compatible engine on this box.
     its public names are re-exported below so existing call sites —
     `from hmasync_controller import bench; bench.<name>` and
     `from hmasync_controller.bench import <name>` — are unaffected)
+  - metrics/ — derived energy/accuracy figures from raw telemetry + inference
+    results (`compute_metrics()`, within-run confidence intervals, the
+    per-run cost-model fit, power/clock-sweep Flexibility; ported from
+    energy-bench's `metrics/*.py` + `grading/flexibility.py`, US-MERGE-03).
+    Not re-exported here (same as `tasks/`) — import from
+    `hmasync_controller.bench.metrics` directly.
 
 energy-bench keeps the LAN-lab layer on top: Home Assistant, smart plugs, the
 collector service, multi-machine fleet sweeps, and the dashboard. None of

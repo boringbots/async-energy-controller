@@ -38,7 +38,17 @@ class NvmlUnavailableError(Exception):
 class TelemetrySample:
     """One 5 Hz bench-trace tick. Every field but `ts` degrades
     independently to `None` on a channel this driver/GPU doesn't support —
-    never a fabricated value (Rule 3, energy-bench/AGENTS.md)."""
+    never a fabricated value (Rule 3, energy-bench/AGENTS.md).
+
+    `cpu_rapl_uj`/`cpu_rapl_dram_uj` (US-MERGE-03) mirror
+    `energy_bench.models.TelemetrySample`'s RAPL fields for full parity with
+    the ported `metrics.compute.compute_cpu_energy`/`compute_cpu_dram_energy`
+    -- but `LocalNvmlSampler.sample()` below never sets them (this box's
+    NVML-only sampler has no local RAPL reader, same as energy-bench's own
+    Tier-C `LocalNvmlSampler.rapl_max_energy_range_uj`, which always stays
+    None). They exist so a future local RAPL reader can populate them
+    without a second `TelemetrySample` definition -- the whole point of
+    unifying on one sampler."""
 
     ts: float
     gpu_power_w: float | None
@@ -52,6 +62,8 @@ class TelemetrySample:
     gpu_mem_clock_mhz: int | None = None
     gpu_fan_pct: int | None = None
     gpu_perf_state: int | None = None
+    cpu_rapl_uj: float | None = None
+    cpu_rapl_dram_uj: float | None = None
 
 
 def _format_cuda_version(raw: int) -> str:
