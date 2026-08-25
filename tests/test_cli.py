@@ -8,6 +8,7 @@ never shells out to nvidia-smi.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -16,6 +17,10 @@ import pytest
 
 from hmasync_controller import cli
 from hmasync_controller.apiclient import ApiClient
+from hmasync_controller.bench.metrics.models import RunMetrics
+from hmasync_controller.bench.quick import QuickModel, QuickSuiteResult, QuickTaskRun
+from hmasync_controller.bench.sampler import TelemetrySample
+from hmasync_controller.bench.submission import validate_bundle
 from hmasync_controller.config import Settings
 from hmasync_controller.executor import JobDef, ScheduleExecutor
 from hmasync_controller.powercap import PowerCapManager
@@ -1035,63 +1040,106 @@ def test_main_dispatches_bench_optin(tmp_path, monkeypatch, capsys):
 
 
 # ============================================================
-# bench quick (US-ONB-03)
+# bench quick (US-ONB-03, in-process since US-MERGE-04)
 # ============================================================
 #
-# `eb` is stubbed with a real (tiny) executable script rather than a
-# monkeypatched subprocess.run, so the preflight check, argument plumbing,
-# and foreground/timeout behavior all run for real — just against a fake
-# binary instead of the real energy-bench, and with no network involved.
-
-_EB_STUB_SUCCESS = """#!/bin/sh
-if [ "$1" = "--help" ]; then
-  echo "eb (stub)"
-  exit 0
-fi
-if [ "$1" = "quick" ]; then
-  shift
-  out=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --share-out) out="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  echo "stub: running quick suite"
-  printf '{"tier": "C", "stub": true}' > "$out"
-  exit 0
-fi
-exit 1
-"""
-
-_EB_STUB_QUICK_FAILS = """#!/bin/sh
-if [ "$1" = "--help" ]; then
-  exit 0
-fi
-if [ "$1" = "quick" ]; then
-  echo boom 1>&2
-  exit 1
-fi
-exit 1
-"""
-
-_EB_STUB_QUICK_HANGS = """#!/bin/sh
-if [ "$1" = "--help" ]; then
-  exit 0
-fi
-if [ "$1" = "quick" ]; then
-  sleep 5
-  exit 0
-fi
-exit 1
-"""
+# The old subprocess seam (a stubbed `eb` executable) is gone -- `bench
+# quick` now runs `hmasync_controller.bench.quick.run_quick_suite` in
+# process. These tests exercise `run_bench_quick`'s own logic (exit-code
+# mapping, artifact writing, bundle construction, opt-in hand-off) by
+# monkeypatching `cli.run_quick_suite` with a canned coroutine per scenario
+# -- the SAME seam name `run_bench_quick` calls, so this is a real
+# integration of that call site, not a bypass of it. `run_quick_suite`'s
+# OWN internals (engine detection, model resolution, the power sweep) are
+# covered separately in tests/test_bench_quick.py; the full mocked
+# end-to-end path (real orchestrator, mocked engine + NVML) lives in
+# tests/test_onboarding_e2e.py.
 
 
-def _write_eb_stub(tmp_path, body: str, name: str = "eb-stub") -> str:
-    script = tmp_path / name
-    script.write_text(body)
-    script.chmod(0o755)
-    return str(script)
+def _fake_run_metrics(**overrides) -> RunMetrics:
+    fields = dict(
+        run_id="quick_ollama_gsm8k_platinum_20260822_120000_ab12cd34",
+        label="quick_ollama_gsm8k_platinum",
+        model="Qwen/Qwen3.5-9B",
+        quantization="Q4_K_M",
+        target_host="localhost",
+        joules_per_token=1.5,
+        total_joules_gpu=500.0,
+        kwh_delta=None,
+        peak_gpu_w=300.0,
+        mean_gpu_w=250.0,
+        mean_tokens_per_second=20.0,
+        run_duration_s=30.0,
+        engine="ollama",
+        engine_version="0.5.7",
+        task="gsm8k_platinum",
+        task_shape="decode",
+        n_items=5,
+        n_correct=4,
+        accuracy=0.8,
+    )
+    fields.update(overrides)
+    return RunMetrics(**fields)
+
+
+def _fake_task_run(**overrides) -> QuickTaskRun:
+    fields = dict(
+        task_name="gsm8k_platinum",
+        task_shape="decode",
+        is_canary=False,
+        dataset_revision=None,
+        n_items=5,
+        n_shot=5,
+        seed=1234,
+        max_tokens=400,
+        power_limit_w=None,
+        inference_results=[],
+        telemetry_samples=[
+            TelemetrySample(
+                ts=1000.0 + i, gpu_power_w=250.0, gpu_util_pct=80.0,
+                gpu_mem_used_mib=8000.0, gpu_temp_c=60.0,
+            )
+            for i in range(3)
+        ],
+        streaming_used=True,
+    )
+    fields.update(overrides)
+    return QuickTaskRun(**fields)
+
+
+def _fake_suite_result(**overrides) -> QuickSuiteResult:
+    fields = dict(
+        engine_name="ollama",
+        engine_base_url="http://localhost:11434",
+        model=QuickModel(
+            name="qwen3.5:9b-q4_K_M",
+            note="ollama:qwen3.5:9b-q4_K_M",
+            record_model="Qwen/Qwen3.5-9B",
+            record_quantization="Q4_K_M",
+        ),
+        gpu_info={
+            "gpu_name": "NVIDIA GeForce RTX 3090",
+            "driver_version": "550.90.07",
+            "cuda_version": "12.4",
+            "gpu_mem_total_mib": 24576.0,
+        },
+        engine_version="0.5.7",
+        power_sweep_skipped_reason=None,
+        runs=[_fake_run_metrics()],
+        task_runs=[_fake_task_run()],
+    )
+    fields.update(overrides)
+    return QuickSuiteResult(**fields)
+
+
+def _quick_settings(tmp_path, **overrides) -> Settings:
+    kwargs = dict(
+        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
+        BENCH_DATA_DIR=str(tmp_path / "bench_data"),
+        NODE_SALT_PATH=str(tmp_path / "salt"),
+    )
+    kwargs.update(overrides)
+    return _settings(tmp_path, **kwargs)
 
 
 def test_bench_quick_subcommand_parses():
@@ -1100,41 +1148,135 @@ def test_bench_quick_subcommand_parses():
     assert args.bench_subcommand == "quick"
 
 
-def test_bench_quick_preflight_missing_binary_prints_install_hint(tmp_path):
-    settings = _settings(tmp_path, ENERGY_BENCH_CMD=str(tmp_path / "no-such-eb"))
+def test_bench_quick_no_engine_detected_is_exit_1(tmp_path, monkeypatch):
+    """No `--share-out` install-hint anymore -- there is no separate binary
+    to be missing. A no-engine box degrades with the stated reason, exit 1."""
+    settings = _quick_settings(tmp_path)
+
+    async def _raise(**kwargs):
+        raise cli.NoEngineDetectedError(
+            "no Ollama or llama.cpp server answered on localhost "
+            "(tried ollama:11434, llamacpp:8080)."
+        )
+
+    monkeypatch.setattr(cli, "run_quick_suite", _raise)
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 1
+    assert "no Ollama or llama.cpp" in message
+    assert not list((tmp_path / "bundles").glob("*.json"))
+
+
+def test_bench_quick_model_not_available_is_exit_2(tmp_path, monkeypatch):
+    """Exit code 2 is now free to mean "model not pulled" -- the old
+    "ENERGY_BENCH_CMD binary not found" preflight no longer exists."""
+    settings = _quick_settings(tmp_path)
+
+    async def _raise(**kwargs):
+        raise cli.ModelNotAvailableError("Run `ollama pull qwen3.5:9b-q4_K_M` first.")
+
+    monkeypatch.setattr(cli, "run_quick_suite", _raise)
 
     code, message = cli.run_bench_quick(settings)
 
     assert code == 2
-    assert "not found" in message
-    assert "ENERGY_BENCH_CMD" in message
+    assert "ollama pull" in message
 
 
-def test_bench_quick_writes_bundle_on_success(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
-    bundle_dir = tmp_path / "bundles"
-    settings = _settings(
-        tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(bundle_dir)
-    )
+def test_bench_quick_nvml_unavailable_degrades_gracefully(tmp_path, monkeypatch):
+    """A no-GPU box: NvmlUnavailableError propagates from `run_quick_suite`
+    (no local NVML device) and maps to a clean exit 1 -- never a crash,
+    never a fabricated result."""
+    settings = _quick_settings(tmp_path)
+
+    async def _raise(**kwargs):
+        raise cli.NvmlUnavailableError("NVML unavailable on this box (no NVIDIA GPU).")
+
+    monkeypatch.setattr(cli, "run_quick_suite", _raise)
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 1
+    assert "NVML" in message
+
+
+def test_bench_quick_all_tasks_failed_is_exit_1(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path)
+
+    async def _raise(**kwargs):
+        raise cli.AllTasksFailedError("every task failed -- nothing was measured.")
+
+    monkeypatch.setattr(cli, "run_quick_suite", _raise)
+
+    code, message = cli.run_bench_quick(settings)
+
+    assert code == 1
+    assert "nothing was measured" in message
+
+
+def test_bench_quick_timeout_is_a_clean_error(tmp_path, monkeypatch):
+    """A hung engine call still times out cleanly -- `asyncio.wait_for`
+    wraps the suite exactly as the old subprocess timeout wrapped `eb`."""
+    settings = _quick_settings(tmp_path)
+
+    async def _hang(**kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(cli, "run_quick_suite", _hang)
+
+    code, message = cli.run_bench_quick(settings, timeout_s=0.05)
+
+    assert code == 1
+    assert "did not finish" in message
+    assert not list((tmp_path / "bundles").glob("*.json"))
+
+
+def test_bench_quick_writes_bundle_and_artifacts_on_success(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_quick_suite", _ok)
     fixed_now = datetime(2026, 8, 22, 12, 0, 0, tzinfo=timezone.utc)
 
     code, message = cli.run_bench_quick(settings, now_fn=lambda: fixed_now)
 
     assert code == 0
-    bundle_path = bundle_dir / "bundle-20260822T120000Z.json"
+    bundle_path = tmp_path / "bundles" / "bundle-20260822T120000Z.json"
     assert bundle_path.exists()
-    assert json.loads(bundle_path.read_text()) == {"tier": "C", "stub": True}
     assert str(bundle_path) in message
 
+    bundle = json.loads(bundle_path.read_text())
+    assert bundle["schema_version"] == "2"
+    assert len(bundle["runs"]) == 1
+    assert bundle["runs"][0]["model"] == "Qwen/Qwen3.5-9B"
+    assert bundle["grades"] == []
+    assert bundle["load_profiles"] == []
+    # No prompts/commands/labels/hosts ever cross into a bundle.
+    text = bundle_path.read_text()
+    assert "localhost" not in text
+    assert "quick_ollama_gsm8k_platinum" not in text  # the label, not the task name
+    errors = validate_bundle(bundle)
+    assert errors == []
 
-def test_bench_quick_no_optin_does_not_hand_off(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
-    settings = _settings(
-        tmp_path,
-        ENERGY_BENCH_CMD=eb,
-        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
-        BENCH_OPTIN=False,
-    )
+    # The scoped artifact (telemetry.parquet/items.parquet/metrics.json) for
+    # the one run in this canned result.
+    run_dir = tmp_path / "bench_data" / _fake_run_metrics().run_id
+    assert (run_dir / "telemetry.parquet").exists()
+    assert (run_dir / "metrics.json").exists()
+    # No inference_results in this canned task run -> no items.parquet.
+    assert not (run_dir / "items.parquet").exists()
+
+
+def test_bench_quick_no_optin_does_not_hand_off(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path, BENCH_OPTIN=False)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_quick_suite", _ok)
     calls = []
 
     code, message = cli.run_bench_quick(
@@ -1146,14 +1288,13 @@ def test_bench_quick_no_optin_does_not_hand_off(tmp_path):
     assert "submitted" not in message
 
 
-def test_bench_quick_optin_hands_off_to_submitter(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
-    settings = _settings(
-        tmp_path,
-        ENERGY_BENCH_CMD=eb,
-        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
-        BENCH_OPTIN=True,
-    )
+def test_bench_quick_optin_hands_off_to_submitter(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path, BENCH_OPTIN=True)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_quick_suite", _ok)
     calls = []
 
     def fake_submit(path, s):
@@ -1169,14 +1310,13 @@ def test_bench_quick_optin_hands_off_to_submitter(tmp_path):
     assert "submitted ok" in message
 
 
-def test_bench_quick_optin_without_submitter_notes_it_honestly(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_SUCCESS)
-    settings = _settings(
-        tmp_path,
-        ENERGY_BENCH_CMD=eb,
-        BENCH_BUNDLE_DIR=str(tmp_path / "bundles"),
-        BENCH_OPTIN=True,
-    )
+def test_bench_quick_optin_without_submitter_notes_it_honestly(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path, BENCH_OPTIN=True)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_quick_suite", _ok)
 
     code, message = cli.run_bench_quick(settings)
 
@@ -1184,28 +1324,25 @@ def test_bench_quick_optin_without_submitter_notes_it_honestly(tmp_path):
     assert "no submitter is wired up" in message
 
 
-def test_bench_quick_nonzero_exit_is_an_error_and_writes_no_bundle(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_QUICK_FAILS)
-    bundle_dir = tmp_path / "bundles"
-    settings = _settings(tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(bundle_dir))
+def test_bench_quick_artifact_write_failure_does_not_lose_the_bundle(tmp_path, monkeypatch):
+    """A run's raw on-disk trace copy failing to write must not sink the
+    whole suite -- the bundle (what actually gets shared) still lands."""
+    settings = _quick_settings(tmp_path)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_quick_suite", _ok)
+
+    def _raise_write(*a, **kw):
+        raise cli.ArtifactWriteError("disk full")
+
+    monkeypatch.setattr(cli, "write_run_artifact", _raise_write)
 
     code, message = cli.run_bench_quick(settings)
 
-    assert code == 1
-    assert "exited 1" in message
-    assert not list(bundle_dir.glob("*.json"))
-
-
-def test_bench_quick_timeout_is_a_clean_error(tmp_path):
-    eb = _write_eb_stub(tmp_path, _EB_STUB_QUICK_HANGS)
-    settings = _settings(
-        tmp_path, ENERGY_BENCH_CMD=eb, BENCH_BUNDLE_DIR=str(tmp_path / "bundles")
-    )
-
-    code, message = cli.run_bench_quick(settings, timeout_s=0.3)
-
-    assert code == 1
-    assert "did not finish" in message
+    assert code == 0
+    assert list((tmp_path / "bundles").glob("*.json"))
 
 
 def test_main_dispatches_bench_quick(tmp_path, monkeypatch, capsys):

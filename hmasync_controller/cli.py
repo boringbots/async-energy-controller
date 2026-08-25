@@ -34,10 +34,10 @@ empty, a workflow id is mistyped, or it is simply 16:00 and the window opens at
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +51,15 @@ from hmasync_controller.adapters import (
 )
 from hmasync_controller.apiclient import ApiClient
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
+from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
+from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
+from hmasync_controller.bench.quick import (
+    AllTasksFailedError,
+    ModelNotAvailableError,
+    NoEngineDetectedError,
+    NvmlUnavailableError,
+    run_quick_suite,
+)
 from hmasync_controller.config import (
     BENCH_CONSENT_TEXT,
     Settings,
@@ -907,42 +916,23 @@ def _bench_submit_fn(bundle_path: str, settings: Settings) -> tuple[int, str]:
 
 
 # ============================================================
-# bench quick — run the ~25-minute suite through the operator's eb
+# bench quick — run the ~25-minute onboarding suite in-process
 # ============================================================
 #
-# Foreground, output NOT captured: stdout/stderr are inherited so the suite's
-# own progress prints straight to the operator's terminal, live, the same as
-# if they had typed `eb quick` themselves. The 45-minute timeout is a
-# backstop against a wedged run, not a target, and is injectable for tests.
+# US-MERGE-04: this used to shell out to a separately-installed
+# `eb quick --share-out <bundle>` (energy-bench's own CLI, `pip install
+# energy-bench` required). That subprocess seam is gone -- engine detection,
+# model verification, 5 Hz sampling, the mini power sweep, artifact writing,
+# and bundle construction all now run in THIS process, via the ported suite
+# under `hmasync_controller.bench` (US-MERGE-01..03 ported the pieces;
+# US-MERGE-04 wires them together). The 45-minute timeout is a backstop
+# against a wedged run, not a target, and is injectable for tests.
 
 BENCH_QUICK_TIMEOUT_S = 45 * 60.0
-BENCH_PREFLIGHT_TIMEOUT_S = 10.0
 
 
 def _bench_utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _bench_install_hint(cmd: str) -> str:
-    return (
-        f"`{cmd}` was not found on this box. Install energy-bench (see its README "
-        f"for the current install method) so `{cmd}` runs, or point ENERGY_BENCH_CMD "
-        "at the right command."
-    )
-
-
-def _bench_cmd_available(cmd: str) -> bool:
-    """Preflight: can `cmd --help` even be exec'd?
-
-    The exit status is not checked — a `--help` that itself exits non-zero is
-    still evidence the binary runs. Only "cannot be executed at all" (missing
-    binary, not executable, hangs past the preflight timeout) counts as absent.
-    """
-    try:
-        subprocess.run([cmd, "--help"], capture_output=True, timeout=BENCH_PREFLIGHT_TIMEOUT_S)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return True
 
 
 def _bench_bundle_path(
@@ -952,6 +942,21 @@ def _bench_bundle_path(
     return Path(bundle_dir) / f"bundle-{ts}.json"
 
 
+def _bench_quick_node_fingerprint(settings: Settings) -> dict[str, Any] | None:
+    """Best-effort node fingerprint for the bundle's `nodes` entry.
+
+    Never blocks `bench quick` on a fingerprinting failure -- a bundle with
+    no node entry still validates (every run's `node_hash` just reads
+    `None`). `build_bundle` runs its own `_check_denylist` over the whole
+    assembled bundle, which covers whatever this returns too.
+    """
+    try:
+        return collect_fingerprint(get_profiler(), settings.NODE_SALT_PATH)
+    except Exception as e:  # noqa: BLE001 - never block bench quick on this
+        logger.warning("bench quick: could not collect this box's fingerprint: %s", e)
+        return None
+
+
 def run_bench_quick(
     settings: Settings,
     *,
@@ -959,32 +964,62 @@ def run_bench_quick(
     now_fn: Callable[[], datetime] | None = None,
     timeout_s: float = BENCH_QUICK_TIMEOUT_S,
 ) -> tuple[int, str]:
-    """Run `eb quick --share-out <bundle>` in the foreground; hand off on opt-in.
+    """Run the onboarding suite in-process; write its artifacts and bundle;
+    hand off to `submit_fn` on opt-in.
 
-    `submit_fn` is the seam a later story wires to the real submission client
-    (POST /api/v1/bench/submissions, spool-on-failure). Until that exists, an
-    opted-in operator sees the bundle path and a plain note that nothing is
+    `submit_fn` is the seam wired to the real submission client (POST
+    /api/v1/bench/submissions, spool-on-failure). An opted-in operator with
+    no `submit_fn` sees the bundle path and a plain note that nothing is
     wired up yet, rather than a pointer to a command that does not exist.
+
+    Exit codes: 0 success (including "opted in, spooled for retry" — a
+    spooled outcome is not an operator error, same contract
+    `run_bench_submit` already has); 1 nothing could be measured (no engine
+    answered, every task failed, or the suite did not finish within
+    `timeout_s`); 2 the reference model isn't available (names the exact
+    `ollama pull ...` command — this box never pulls a model itself).
     """
-    cmd = settings.ENERGY_BENCH_CMD
-    if not _bench_cmd_available(cmd):
-        return 2, _bench_install_hint(cmd)
+    try:
+        result = asyncio.run(asyncio.wait_for(run_quick_suite(), timeout=timeout_s))
+    except TimeoutError:
+        return 1, f"bench quick did not finish within {int(timeout_s)}s; no bundle was written"
+    except ModelNotAvailableError as e:
+        return 2, str(e)
+    except (NoEngineDetectedError, NvmlUnavailableError, AllTasksFailedError) as e:
+        return 1, str(e)
+
+    for run_metrics, task_run in zip(result.runs, result.task_runs, strict=True):
+        try:
+            write_run_artifact(
+                settings.BENCH_DATA_DIR,
+                run_metrics.run_id,
+                task_run.telemetry_samples,
+                task_run.inference_results,
+                run_metrics,
+            )
+        except ArtifactWriteError as e:
+            # An artifact-write failure must not lose the run's data from
+            # the bundle the operator is about to submit -- only the raw,
+            # on-disk trace copy is missing, which is a lesser loss.
+            logger.warning(
+                "bench quick: could not write the artifact folder for %s: %s",
+                run_metrics.run_id, e,
+            )
+
+    node = _bench_quick_node_fingerprint(settings)
+    try:
+        bundle = build_bundle(result.runs, node)
+    except ExportDenylistViolation as e:
+        # Defense in depth: `build_bundle`'s own allowlist should make this
+        # unreachable in practice (see bench/bundle.py's module docstring),
+        # but if it ever fires, refuse LOCALLY -- no bundle written, nothing
+        # queued for a later retry (a retry would fail identically).
+        return 1, f"refusing to write a bundle -- {e}"
 
     bundle_dir = Path(settings.BENCH_BUNDLE_DIR)
     bundle_dir.mkdir(parents=True, exist_ok=True)
     bundle_path = _bench_bundle_path(bundle_dir, now_fn=now_fn or _bench_utcnow)
-
-    try:
-        proc = subprocess.run([cmd, "quick", "--share-out", str(bundle_path)], timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        return 1, f"{cmd} quick did not finish within {int(timeout_s)}s; no bundle was written"
-    except OSError as exc:
-        return 1, f"failed to run {cmd} quick: {exc}"
-
-    if proc.returncode != 0:
-        return 1, f"{cmd} quick exited {proc.returncode}; no bundle was written"
-    if not bundle_path.exists():
-        return 1, f"{cmd} quick exited 0 but {bundle_path} was not written"
+    bundle_path.write_text(json.dumps(bundle, indent=2, default=str))
 
     message = f"bundle written to {bundle_path}"
     if not settings.BENCH_OPTIN:

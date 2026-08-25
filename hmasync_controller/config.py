@@ -63,9 +63,14 @@ class Settings(BaseSettings):
     BENCH_OPTIN: bool = False
     # Where `bench quick` writes its dated bundle files.
     BENCH_BUNDLE_DIR: str = "bench_bundles"
-    # The energy-bench CLI command installed on this box. Not on PyPI yet, so
-    # this stays a plain command name rather than a package pin.
-    ENERGY_BENCH_CMD: str = "eb"
+    # Where `bench quick` writes each measured task's own artifact folder
+    # (telemetry.parquet/items.parquet/metrics.json) -- see bench/artifact.py.
+    # Distinct from BENCH_BUNDLE_DIR: a bundle is the privacy-filtered,
+    # submission-shaped rollup of one or more runs; this is the raw per-run
+    # trace an operator can inspect locally. No DuckDB here (GROUND TRUTH:
+    # the run index stays lab-side) -- these folders are the only durable
+    # record of a `bench quick` run's raw telemetry.
+    BENCH_DATA_DIR: str = "bench_data"
     # Where a bench-bundle submission is queued when the API is unreachable at
     # send time — same store-and-forward pattern as SPOOL_PATH, kept in its own
     # file so a stuck bench submission never blocks or mixes into the

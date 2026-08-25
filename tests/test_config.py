@@ -102,12 +102,12 @@ def test_resolve_controller_id_falls_back_to_hostname():
 
 
 def test_bench_settings_default_off(monkeypatch):
-    for key in ("BENCH_OPTIN", "BENCH_BUNDLE_DIR", "ENERGY_BENCH_CMD"):
+    for key in ("BENCH_OPTIN", "BENCH_BUNDLE_DIR", "BENCH_DATA_DIR"):
         monkeypatch.delenv(key, raising=False)
     settings = Settings(_env_file=None)
     assert settings.BENCH_OPTIN is False
     assert settings.BENCH_BUNDLE_DIR == "bench_bundles"
-    assert settings.ENERGY_BENCH_CMD == "eb"
+    assert settings.BENCH_DATA_DIR == "bench_data"
 
 
 def test_bench_optin_comes_from_env_file(tmp_path, monkeypatch):

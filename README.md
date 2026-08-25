@@ -415,11 +415,11 @@ already submitted is not withdrawn.
 async-energy-controller bench quick
 ```
 
-This runs [energy-bench](https://async.energy)'s quick suite through your
-existing install (`eb quick --share-out <bundle>`) in the foreground, streaming
-its own progress — unmeasured here, but the suite's own name for it is the
-~25-minute tier: **Tier C, no smart plug required**, using GPU-reported power
-instead of a wall meter. If opted in, the bundle it writes is submitted
+This runs the onboarding suite in-process — no separate `energy-bench` install,
+no subprocess — against whichever inference server you already have running
+(Ollama, then llama.cpp). Unmeasured here, but the suite's own name for it is
+the ~25-minute tier: **Tier C, no smart plug required**, using GPU-reported
+power instead of a wall meter. If opted in, the bundle it writes is submitted
 automatically once the run finishes; if not, you get a bundle file on disk and
 nothing leaves the box. `bench submit <bundle.json>` sends one by hand, e.g. a
 bundle from an earlier run that was never opted in at the time.
