@@ -27,6 +27,15 @@ dependencies = [
     "httpx==0.28.1",
     "pydantic==2.13.3",
     "pydantic-settings==2.14.0",
+    # NVML sampling (hmasync_controller/nvml_reader.py, profiler.py's
+    # NVMLProfiler, bench/sampler.py's LocalNvmlSampler) — promoted from the
+    # `[gpu]` extra to a base dependency at US-MERGE-02, since a bare
+    # `pip install async-energy-controller` now also runs `bench quick`,
+    # which needs local NVML on any NVIDIA box. Stays import-lazy inside
+    # both profiler.py and bench/sampler.py, so a no-GPU box still imports
+    # this package cleanly and `get_profiler()` degrades to SmiProfiler/
+    # NullProfiler exactly as before.
+    "nvidia-ml-py==12.560.30",
     # Benchmark datasets (hmasync_controller/bench/tasks/) are pulled as
     # parquet straight from the HF hub via huggingface_hub + pyarrow (US-MERGE-01,
     # ported from energy-bench's tasks/base.py). The full `datasets` package is
@@ -63,11 +72,12 @@ Source = "https://github.com/boringbots/async-energy-controller"
 Issues = "https://github.com/boringbots/async-energy-controller/issues"
 
 [project.optional-dependencies]
-# NVIDIA GPU boxes only — lazy-imported by profiler.py's NVMLProfiler. Absent →
-# get_profiler() falls back to SmiProfiler (nvidia-smi CLI) or NullProfiler, so
-# the controller installs and runs on a box with no GPU.
-#   pip install -e ".[gpu]"
-gpu = ["nvidia-ml-py==12.560.30"]
+# Back-compat no-op: `nvidia-ml-py` moved into the base `dependencies` list
+# above at US-MERGE-02 (a bare install now runs `bench quick`, which needs
+# NVML too). Kept as an empty extra so an existing `pip install -e ".[gpu]"`
+# in a script or doc still resolves instead of erroring — same "permanent
+# alias" reasoning as the `hm-async-controller` console script below.
+gpu = []
 # Test-only.
 test = ["pytest==9.0.3"]
 

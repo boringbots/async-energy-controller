@@ -62,8 +62,7 @@ git clone https://github.com/boringbots/async-energy-controller.git
 cd async-energy-controller
 python -m venv.venv && source.venv/bin/activate
 
-pip install -e ".[gpu]"   # NVIDIA box — adds NVML for exact energy readings
-# pip install -e.        # no GPU — installs and runs fine, energy stays null
+pip install -e.   # installs and runs fine with no GPU driver — energy stays null
 ```
 
 This puts `async-energy-controller` on your PATH (and `hm-async-controller` as a
@@ -525,7 +524,7 @@ by name.
 | `catalog=0` in the tick line | The catalog file was not found. Check `--job-catalog` / `HM_ASYNC_JOB_CATALOG`; `--check` prints the exact path it resolved. |
 | A job runs but reports suspiciously little work | For `ollama`/`openai`, check `prompt_file` points at a file that exists — an unreadable one now fails the run rather than sending an empty prompt. |
 | A job died with `command timed out` | It exceeded the time left in its placement window. Set an explicit `"timeout"` in its request if it genuinely needs longer, or widen the window. |
-| `energy_wh` is null on every run | No NVML on the box — install the `[gpu]` extra. Scheduling still works on duration alone. |
+| `energy_wh` is null on every run | No NVIDIA driver on the box, so NVML has nothing to read. Scheduling still works on duration alone. |
 | `cpu_rapl_uj` is null in traces | RAPL is root-readable-only on recent kernels. Harmless; GPU energy still measures. |
 | Login fails at startup | Check `HM_ASYNC_API_URL`, and that the account confirmed its email. |
 | Schedule says `degraded: true` | Server-side: prices were stale when the plan was made. The plan still respects every deadline. |

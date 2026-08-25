@@ -21,11 +21,17 @@ CPU RAPL is **independent of the GPU backend**: the shared sampler reads the
 Linux RAPL package-energy counter every tick, so a NullProfiler box with RAPL
 still reports `cpu_rapl_uj` in its trace (the API turns that into `cpu_energy_wh`).
 
-Reference implementation (READ-ONLY copy-source, separate repo): the energy-bench
-collector's lazy-pynvml sampler loop and dual-path (Intel/AMD) RAPL reader
-(`AI-Energy-Experimentation/Benchmarking/energy-bench/collector/collector.py`).
-Copied and extended here with the energy counter, SM clocks, and throttle reasons
-it lacked.
+Historical provenance: this backend's design started as a read of the
+energy-bench collector's lazy-pynvml sampler loop and dual-path (Intel/AMD)
+RAPL reader
+(`AI-Energy-Experimentation/Benchmarking/energy-bench/collector/collector.py`,
+a separate repo). As of US-MERGE-02 that is history, not the current shape:
+the actual per-tick NVML register reads live in ONE place in THIS repo,
+`nvml_reader.py`, shared by this profiler's 1 Hz `RunTelemetry` and
+`bench.sampler.LocalNvmlSampler`'s 5 Hz bench trace (itself ported from
+energy-bench's `quick.py`). Neither caller re-implements the pynvml call
+sequence; each just shapes `nvml_reader.read_nvml_channels()`'s output to
+its own contract (cadence, field names, decoded vs. raw throttle reasons).
 
 Import safety: nothing here touches pynvml or a GPU at import time. `pynvml` is
 imported lazily inside `NVMLProfiler`/`_nvml_available`, so this module imports
@@ -43,6 +49,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from hmasync_controller.nvml_reader import read_energy_counter_mj, read_nvml_channels
 
 # --- unit conversions (nail these down; they are the whole game — see rollup.py) ---
 # NVML nvmlDeviceGetTotalEnergyConsumption returns MILLIJOULES; 1 Wh = 3.6e6 mJ.
@@ -467,38 +475,21 @@ class NVMLProfiler(_SampledProfiler):
 
     def _read_gpu_sample(self) -> dict:
         self._ensure_nvml()
-        nv, h = self._nvml, self._handle
-        out: dict[str, Any] = {}
-
-        power_mw = _try(lambda: nv.nvmlDeviceGetPowerUsage(h))
-        out["power_w"] = power_mw / 1000.0 if power_mw is not None else None
-
-        util = _try(lambda: nv.nvmlDeviceGetUtilizationRates(h))
-        out["util_gpu"] = float(util.gpu) if util is not None else None
-        out["util_mem"] = float(util.memory) if util is not None else None
-
-        mem = _try(lambda: nv.nvmlDeviceGetMemoryInfo(h))
-        out["mem_used_mb"] = mem.used / (1024 * 1024) if mem is not None else None
-
-        out["temp_c"] = _try(
-            lambda: float(nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU))
-        )
-        out["sm_clock_mhz"] = _try(
-            lambda: float(nv.nvmlDeviceGetClockInfo(h, nv.NVML_CLOCK_SM))
-        )
-
-        fn = _throttle_fn(nv)
-        mask = _try(lambda: fn(h)) if fn is not None else None
-        out["throttle_reasons"] = _decode_throttle(nv, mask) if mask is not None else None
-        return out
+        ch = read_nvml_channels(self._nvml, self._handle)
+        mask = ch["throttle_mask"]
+        return {
+            "power_w": ch["power_w"],
+            "util_gpu": ch["util_gpu"],
+            "util_mem": ch["util_mem"],
+            "mem_used_mb": ch["mem_used_mib"],
+            "temp_c": ch["temp_c"],
+            "sm_clock_mhz": ch["sm_clock_mhz"],
+            "throttle_reasons": _decode_throttle(self._nvml, mask) if mask is not None else None,
+        }
 
     def _read_energy_counter_mj(self) -> float | None:
         self._ensure_nvml()
-        return _try(
-            lambda: float(
-                self._nvml.nvmlDeviceGetTotalEnergyConsumption(self._handle)
-            )
-        )
+        return read_energy_counter_mj(self._nvml, self._handle)
 
     def device_fingerprint(self) -> dict[str, Any]:
         """GPU model name, driver version, and total VRAM (GB) via THIS handle.

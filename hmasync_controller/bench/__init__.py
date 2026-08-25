@@ -11,6 +11,11 @@ graceful null) and an OpenAI-compatible engine on this box.
     extensible via `tasks.register_task` so a downstream package, e.g.
     energy-bench's lab layer re-registering `humaneval_plus`, can add its own
     without touching this module)
+  - sampler.py — `LocalNvmlSampler`, the 5 Hz bench telemetry source (ported
+    from energy-bench's `quick.py`, US-MERGE-02); shares its per-tick NVML
+    register reads with `hmasync_controller.profiler` via
+    `hmasync_controller.nvml_reader` so there is exactly one NVML sampling
+    implementation in this repo
   - submission.py — validate/redact/spool/submit a bundle (formerly the flat
     `hmasync_controller/bench.py`, moved here when `bench` became a package;
     its public names are re-exported below so existing call sites —
@@ -22,6 +27,11 @@ collector service, multi-machine fleet sweeps, and the dashboard. None of
 that lives here.
 """
 
+from hmasync_controller.bench.sampler import (
+    LocalNvmlSampler,
+    NvmlUnavailableError,
+    TelemetrySample,
+)
 from hmasync_controller.bench.submission import (
     DENYLISTED_KEY_SUBSTRINGS,
     SCHEMA_PATH,
@@ -38,7 +48,10 @@ __all__ = [
     "DENYLISTED_KEY_SUBSTRINGS",
     "SCHEMA_PATH",
     "BenchDrainResult",
+    "LocalNvmlSampler",
+    "NvmlUnavailableError",
     "SubmitResult",
+    "TelemetrySample",
     "denylisted_keys",
     "drain_bench_spool",
     "load_schema",
