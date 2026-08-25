@@ -46,23 +46,15 @@ dependencies = [
     # (bench/tasks/ifeval_checks.py) need language detection; profiles are
     # bundled in the wheel so detect() needs no network call at score time.
     "langdetect==1.0.9",
-    # longctx_summary scores ROUGE-L F1 against GovReport reference summaries
-    # (bench/tasks/longctx_summary.py). Works fully offline with
-    # use_stemmer=False (regex tokenizer, no nltk data download).
-    #
-    # DISCREPANCY vs. tasks/prd-controller-merge.md's GROUND TRUTH (recorded
-    # at US-MERGE-01): that doc lists only huggingface-hub/langdetect as new
-    # base deps and states "numpy does NOT [join]" because only the excluded
-    # humaneval sandbox needs it. That claim did not account for this
-    # dependency: rouge-score==0.1.2 itself requires absl-py, nltk, numpy and
-    # six. Since longctx_summary is one of the 9 tasks the GROUND TRUTH
-    # explicitly names as moving, rouge-score (and its transitive numpy) has
-    # to come along. This will make US-MERGE-06's dependency-audit acceptance
-    # criterion ("exactly httpx, pydantic, pydantic-settings, pynvml, pyarrow,
-    # huggingface-hub, langdetect") false as literally written — that story
-    # needs to either widen the expected set or find a numpy-free ROUGE-L
-    # scorer before asserting it.
-    "rouge-score==0.1.2",
+    # NOT a dependency, on purpose: `rouge-score`. US-MERGE-01 added it for
+    # longctx_summary's ROUGE-L F1 scoring, and it drags absl-py, nltk, numpy
+    # and six into the base install of a package whose whole point is one thin
+    # download. US-MERGE-06 replaced it with bench/tasks/rouge_l.py — ~30 lines
+    # of pure Python, verified to reproduce
+    # `RougeScorer(["rougeL"], use_stemmer=False)` exactly (318/318 cases,
+    # tests/test_bench_rouge_l.py) — so the list above is now exactly the set
+    # tasks/prd-controller-merge.md's success metrics name, and
+    # tests/test_base_install_audit.py asserts it.
 ]
 
 [project.urls]

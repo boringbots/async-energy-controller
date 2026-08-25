@@ -1326,9 +1326,13 @@ def test_compute_metrics_streaming_fields_wired_when_used():
 
 def test_no_numpy_import_in_metrics_package():
     """Acceptance criterion: the ported metrics package is pure Python.
-    `rouge-score` (bench.tasks.longctx_summary, US-MERGE-01) pulls numpy
-    transitively into this package's base install, so this checks the
-    ported modules' own source -- not whether numpy is importable at all."""
+
+    This checks the ported modules' OWN SOURCE, not whether numpy is
+    importable: US-MERGE-01's `rouge-score` used to drag numpy into the base
+    install, and a dev box can still have it installed from before
+    US-MERGE-06 dropped that dependency (see
+    tests/test_base_install_audit.py, which now asserts numpy is absent from
+    the install's transitive closure as well)."""
     import ast
     import inspect
 

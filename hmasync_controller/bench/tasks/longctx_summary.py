@@ -4,7 +4,8 @@ GovReport-derived long documents (ccdv/govreport-summarization) are bucketed
 into a fixed set of token-count ranges covering 8K-32K tokens, giving a
 controlled long-prefill workload distinct from every other task in this suite
 (all of which sit well under 2K prompt tokens). Scored via ROUGE-L F1 against
-the reference summary using the `rouge-score` package, and returned as a
+the reference summary (`bench.tasks.rouge_l`, a numpy-free reimplementation
+of `rouge-score`'s `rougeL` scorer — see that module), and returned as a
 continuous value rather than thresholded to a pass/fail — the point of this
 instrument is to detect *degraded but not garbage* output (e.g. a heavily
 quantized or power-capped model producing a worse-but-still-on-topic
@@ -25,14 +26,13 @@ prompt-token count the engine returns per item is the ground truth for any
 downstream energy-per-token analysis.
 """
 
-from rouge_score import rouge_scorer
-
 from hmasync_controller.bench.tasks.base import (
     Task,
     TaskItem,
     fetch_parquet_rows,
     sample_indices,
 )
+from hmasync_controller.bench.tasks.rouge_l import rouge_l_fmeasure
 
 REPO = "ccdv/govreport-summarization"
 
@@ -55,8 +55,6 @@ TOKEN_BUCKETS: tuple[tuple[str, int, int], ...] = (
     ("16k-24k", 16_000, 24_000),
     ("24k-32k", 24_000, 32_000),
 )
-
-_scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
 
 
 def _bucket_label(estimated_tokens: int) -> str:
@@ -120,4 +118,4 @@ class LongctxSummaryTask(Task):
         return items
 
     def score(self, completion: str, item: TaskItem) -> float:
-        return _scorer.score(item.target, completion.strip())["rougeL"].fmeasure
+        return rouge_l_fmeasure(item.target, completion.strip())
