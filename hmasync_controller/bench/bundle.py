@@ -281,15 +281,23 @@ def build_bundle(
     runs: list[RunMetrics],
     node: dict[str, object] | None,
     generated_at: str | None = None,
+    *,
+    suite: str = "quick",
 ) -> dict[str, object]:
-    """Assemble the submission bundle from a `bench quick` run's freshly
-    computed `RunMetrics` and this box's own fingerprint dict.
+    """Assemble the submission bundle from a `bench quick`/`bench calibrate`
+    run's freshly computed `RunMetrics` and this box's own fingerprint dict.
 
     Pure -- no I/O, no DuckDB (this package has none). `node` is the dict
     `fingerprint.collect_fingerprint()` returns (or `None` if fingerprinting
     failed entirely, in which case the bundle carries no node at all and
     every run's `node_hash` is `None`). `grades`/`load_profiles`/
     `baselines` are always empty arrays -- see module docstring.
+
+    `suite` (US-MERGE-05) stamps the top-level `suite` field -- `"quick"`
+    (the leaderboard-grade default) or `"calibrate"` (the slimmed probe,
+    never pooled with `quick` results server-side). The field is OPTIONAL in
+    the vendored schema, so a reader built against the schema from before
+    this addition still validates every bundle this function produces.
 
     Raises:
         ExportDenylistViolation: If the assembled bundle fails the
@@ -310,6 +318,7 @@ def build_bundle(
     bundle: dict[str, object] = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "generated_at": stamp,
+        "suite": suite,
         "nodes": exported_nodes,
         "runs": exported_runs,
         "grades": [],

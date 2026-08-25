@@ -24,6 +24,9 @@ import pytest
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT, OllamaModelNotPulledError
 from hmasync_controller.bench.metrics.models import InferenceResult
 from hmasync_controller.bench.quick import (
+    CALIBRATE_MAX_SWEEP_POINTS,
+    CALIBRATE_TASK_N_ITEMS,
+    CALIBRATE_TASKS,
     QUICK_REFERENCE_MODELS,
     QUICK_REFERENCE_N_SHOT,
     QUICK_REFERENCE_SEED,
@@ -38,6 +41,7 @@ from hmasync_controller.bench.quick import (
     _derive_power_sweep_caps_w,
     detect_engine,
     resolve_quick_model,
+    run_calibrate_suite,
     run_power_sweep,
     run_quick_suite,
     run_quick_task,
@@ -487,6 +491,89 @@ class TestRunPowerSweepDerivesFromCard:
         assert [p.requested_w for p in points] == [450, 431, 374]
 
 
+class TestRunPowerSweepMaxPoints:
+    """`max_points` (US-MERGE-05, `bench calibrate`) caps how many points are
+    actually MEASURED without changing the derivation/short-ladder-reason
+    logic above it -- that logic is computed from the FULL ladder first, so
+    a caller that only wants the first point never sees a false "the card
+    can't fit the ladder" reason manufactured by its own request to stop
+    early."""
+
+    def test_truncates_explicit_caps(self):
+        telemetry = _FakeTelemetry(_samples(2))
+        telemetry.set_power_limit_w = AsyncMock(side_effect=[280, 250, 225])
+        fake_run = MagicMock()
+
+        with patch(
+            "hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(return_value=fake_run)
+        ):
+            points, reason = _run(
+                run_power_sweep(
+                    AsyncMock(), telemetry, "some-model", n_items=25,
+                    caps_w=[280, 250, 225], max_points=1,
+                )
+            )
+
+        assert reason is None
+        assert len(points) == 1
+        assert points[0].requested_w == 280
+        telemetry.set_power_limit_w.assert_awaited_once_with(280)
+
+    def test_truncates_a_full_derived_ladder_without_a_false_short_ladder_reason(self):
+        telemetry = _FakeTelemetry(_samples(2), stock_w=300)
+        telemetry.set_power_limit_w = AsyncMock(side_effect=lambda watts: watts)
+        fake_run = MagicMock()
+
+        with patch(
+            "hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(return_value=fake_run)
+        ):
+            points, reason = _run(
+                run_power_sweep(AsyncMock(), telemetry, "some-model", n_items=25, max_points=1)
+            )
+
+        assert reason is None
+        assert len(points) == 1
+        assert points[0].requested_w == 255  # 0.85 * 300, the highest-fraction cap
+
+    def test_larger_than_the_ladder_is_a_noop(self):
+        telemetry = _FakeTelemetry(_samples(2))
+        telemetry.set_power_limit_w = AsyncMock(return_value=280)
+        fake_run = MagicMock()
+
+        with patch(
+            "hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(return_value=fake_run)
+        ):
+            points, reason = _run(
+                run_power_sweep(
+                    AsyncMock(), telemetry, "some-model", n_items=25,
+                    caps_w=[280], max_points=5,
+                )
+            )
+
+        assert reason is None
+        assert len(points) == 1
+
+    def test_short_ladder_reason_still_fires_when_the_card_is_the_real_limit(self):
+        """A genuinely collapsed ladder (the card's own supported range
+        drops it to 2 of 3 rungs) still reports why, even when `max_points`
+        would only have measured 1 anyway -- the reason describes the
+        CARD's limit, not the caller's own request."""
+        telemetry = _FakeTelemetry(_samples(2), stock_w=200, min_w=150, max_w=170)
+        telemetry.set_power_limit_w = AsyncMock(side_effect=lambda watts: watts)
+        fake_run = MagicMock()
+
+        with patch(
+            "hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(return_value=fake_run)
+        ):
+            points, reason = _run(
+                run_power_sweep(AsyncMock(), telemetry, "some-model", n_items=25, max_points=1)
+            )
+
+        assert reason is not None
+        assert "only 2 of 3" in reason
+        assert len(points) == 1
+
+
 class TestQuickModelResolution:
     def test_llamacpp_gguf_spec_matches_verified_repo(self):
         spec = QUICK_REFERENCE_MODELS["llama.cpp"]
@@ -705,4 +792,129 @@ class TestRunQuickSuite:
         # Restore-in-finally: the 3 sweep caps, then the original 300 W last.
         assert telemetry.set_power_limit_w.await_count == 4
         assert telemetry.set_power_limit_w.await_args_list[-1].args == (300,)
+        telemetry.close.assert_called_once()
+
+
+# ============================================================
+# run_calibrate_suite (US-MERGE-05) -- the slimmed sibling of run_quick_suite:
+# one task (CALIBRATE_TASKS) plus at most CALIBRATE_MAX_SWEEP_POINTS capped
+# point(s). Both share `_run_bench_suite`, so this only re-proves the wiring
+# that differs between them (which tasks, how many sweep points, the label
+# prefix) -- the shared restore-in-finally/exception contract is already
+# exhaustively covered above by TestRunQuickSuite.
+# ============================================================
+
+
+class TestRunCalibrateSuite:
+    def test_calibrate_constants_match_the_spec(self):
+        assert CALIBRATE_TASKS == [("gsm8k_platinum", CALIBRATE_TASK_N_ITEMS)]
+        assert CALIBRATE_TASK_N_ITEMS == 15
+        assert CALIBRATE_MAX_SWEEP_POINTS == 1
+
+    def test_no_engine_detected_raises(self):
+        async def _none(*a, **kw):
+            return None
+
+        with patch("hmasync_controller.bench.quick.detect_engine", _none):
+            with pytest.raises(NoEngineDetectedError):
+                _run(run_calibrate_suite())
+
+    def test_success_measures_exactly_one_task_with_calibrate_label_prefix(self):
+        engine, model = _suite_engine_and_model()
+        telemetry = _suite_telemetry(stock_w=None)  # sweep skips: stock unreadable
+
+        async def _detect(*a, **kw):
+            return engine
+
+        async def _resolve(*a, **kw):
+            return model
+
+        async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+            return _fake_task_run(task_name, n_items, **kw)
+
+        with (
+            patch("hmasync_controller.bench.quick.detect_engine", _detect),
+            patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
+            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.VLLMClient"),
+            patch(
+                "hmasync_controller.bench.quick.run_quick_task",
+                new=AsyncMock(side_effect=_fake_run_quick_task),
+            ),
+        ):
+            result = _run(run_calibrate_suite())
+
+        assert len(result.runs) == 1
+        assert result.runs[0].task == "gsm8k_platinum"
+        # The RunMetrics' own n_items is derived from the fake's single
+        # inference_result; what was actually REQUESTED of run_quick_task
+        # lands on the paired QuickTaskRun instead.
+        assert result.task_runs[0].n_items == CALIBRATE_TASK_N_ITEMS
+        assert result.runs[0].label.startswith("calibrate_ollama")
+        assert result.power_sweep_skipped_reason is not None
+
+    def test_success_measures_at_most_one_sweep_point_even_though_the_card_supports_three(self):
+        """A card that would derive a full 3-point ladder for `bench quick`
+        yields only ONE capped point here -- `CALIBRATE_MAX_SWEEP_POINTS`."""
+        engine, model = _suite_engine_and_model()
+        telemetry = _suite_telemetry(stock_w=300, min_w=100, max_w=350)
+
+        async def _detect(*a, **kw):
+            return engine
+
+        async def _resolve(*a, **kw):
+            return model
+
+        async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+            return _fake_task_run(task_name, n_items, **kw)
+
+        with (
+            patch("hmasync_controller.bench.quick.detect_engine", _detect),
+            patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
+            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.VLLMClient"),
+            patch(
+                "hmasync_controller.bench.quick.run_quick_task",
+                new=AsyncMock(side_effect=_fake_run_quick_task),
+            ),
+        ):
+            result = _run(run_calibrate_suite())
+
+        # 1 baseline task + 1 capped point = 2 total (never the full 3-rung
+        # ladder `run_quick_suite` would measure on the same card).
+        assert len(result.runs) == 2
+        capped_runs = [r for r in result.runs if r.power_limit_w is not None]
+        assert len(capped_runs) == 1
+        assert capped_runs[0].power_limit_w == 255  # 0.85 * 300
+        assert result.power_sweep_skipped_reason is None
+
+        # Restore-in-finally: the 1 sweep cap, then the original 300 W last.
+        assert telemetry.set_power_limit_w.await_count == 2
+        assert telemetry.set_power_limit_w.await_args_list[-1].args == (300,)
+        telemetry.close.assert_called_once()
+
+    def test_all_tasks_failed_raises_and_still_restores_power_limit(self):
+        engine, model = _suite_engine_and_model()
+        telemetry = _suite_telemetry(stock_w=300)
+
+        async def _detect(*a, **kw):
+            return engine
+
+        async def _resolve(*a, **kw):
+            return model
+
+        async def _always_fail(*a, **kw):
+            raise RuntimeError("engine went away mid-task")
+
+        with (
+            patch("hmasync_controller.bench.quick.detect_engine", _detect),
+            patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
+            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.VLLMClient"),
+            patch("hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(side_effect=_always_fail)),
+        ):
+            with pytest.raises(AllTasksFailedError):
+                _run(run_calibrate_suite())
+
+        telemetry.set_power_limit_w.assert_awaited_once_with(300)
         telemetry.close.assert_called_once()

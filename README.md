@@ -430,6 +430,20 @@ the API is unreachable when a submission is ready, it spools to disk and goes
 out on the controller's normal reconnect cadence — the same offline-safe
 pattern used for run reports.
 
+### A faster option — `bench calibrate`
+
+```bash
+async-energy-controller bench calibrate
+```
+
+A ~3-5 minute slimmed probe: one decode task (~15 items) plus the mini power
+sweep's first capped point, instead of `bench quick`'s full ~25-minute suite.
+Enough to give the predictor and cap-recommendation the per-machine figures
+they need, without the full run. Its bundle is stamped `suite: "calibrate"`
+and never pooled with `bench quick` results — **`bench quick` remains the
+leaderboard-grade, publishable measurement**; use `calibrate` when you only
+need scheduling figures fast.
+
 ### What you get back
 
 - **Cold-start priors.** `register --bench-gpu-class rtx4090

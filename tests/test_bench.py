@@ -66,6 +66,20 @@ def test_v2_bundle_with_baselines_is_valid():
     assert bench.validate_bundle(bundle) == []
 
 
+def test_bundle_with_suite_calibrate_is_valid():
+    # US-MERGE-05: `suite` is an OPTIONAL top-level field -- a bundle from
+    # before this addition (no `suite` key at all, like `_minimal_bundle()`)
+    # keeps validating unchanged (test_minimal_v2_bundle_is_valid above), and
+    # a bundle stamping either allowed value validates too.
+    assert bench.validate_bundle(_minimal_bundle(schema_version="2", suite="calibrate")) == []
+    assert bench.validate_bundle(_minimal_bundle(schema_version="2", suite="quick")) == []
+
+
+def test_bundle_with_unknown_suite_value_is_rejected():
+    errors = bench.validate_bundle(_minimal_bundle(schema_version="2", suite="full"))
+    assert any("suite" in e for e in errors)
+
+
 def test_missing_required_field_is_reported():
     bundle = _minimal_bundle()
     del bundle["runs"]

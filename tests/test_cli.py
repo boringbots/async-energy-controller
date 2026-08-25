@@ -1250,6 +1250,7 @@ def test_bench_quick_writes_bundle_and_artifacts_on_success(tmp_path, monkeypatc
 
     bundle = json.loads(bundle_path.read_text())
     assert bundle["schema_version"] == "2"
+    assert bundle["suite"] == "quick"
     assert len(bundle["runs"]) == 1
     assert bundle["runs"][0]["model"] == "Qwen/Qwen3.5-9B"
     assert bundle["grades"] == []
@@ -1371,6 +1372,83 @@ def test_main_wires_bench_submit_fn_into_bench_quick(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "run_bench_quick", fake_run_bench_quick)
     assert cli.main(["bench", "quick"]) == 0
     assert seen["submit_fn"] is cli._bench_submit_fn
+
+
+# ============================================================
+# bench calibrate (US-MERGE-05)
+# ============================================================
+#
+# `run_bench_calibrate` shares `_run_bench_suite_cli` with `run_bench_quick`
+# (exit-code mapping, artifact writing, opt-in hand-off already exhaustively
+# covered above) -- these tests only re-prove what differs: it awaits
+# `run_calibrate_suite` (not `run_quick_suite`) and stamps the bundle
+# `suite: "calibrate"`.
+
+
+def test_bench_calibrate_subcommand_parses():
+    args = cli._parse_args(["bench", "calibrate"])
+    assert args.subcommand == "bench"
+    assert args.bench_subcommand == "calibrate"
+
+
+def test_bench_calibrate_no_engine_detected_is_exit_1(tmp_path, monkeypatch):
+    """Patching `run_quick_suite` must NOT affect `bench calibrate` -- it is
+    wired to the separate `run_calibrate_suite` seam."""
+    settings = _quick_settings(tmp_path)
+
+    async def _raise(**kwargs):
+        raise cli.NoEngineDetectedError("no Ollama or llama.cpp server answered on localhost.")
+
+    async def _should_not_run(**kwargs):
+        raise AssertionError("run_bench_calibrate must not call run_quick_suite")
+
+    monkeypatch.setattr(cli, "run_calibrate_suite", _raise)
+    monkeypatch.setattr(cli, "run_quick_suite", _should_not_run)
+
+    code, message = cli.run_bench_calibrate(settings)
+
+    assert code == 1
+    assert "no Ollama or llama.cpp" in message
+    assert not list((tmp_path / "bundles").glob("*.json"))
+
+
+def test_bench_calibrate_writes_bundle_stamped_calibrate(tmp_path, monkeypatch):
+    settings = _quick_settings(tmp_path)
+
+    async def _ok(**kwargs):
+        return _fake_suite_result()
+
+    monkeypatch.setattr(cli, "run_calibrate_suite", _ok)
+    fixed_now = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
+
+    code, message = cli.run_bench_calibrate(settings, now_fn=lambda: fixed_now)
+
+    assert code == 0
+    bundle_path = tmp_path / "bundles" / "bundle-20260825T120000Z.json"
+    assert bundle_path.exists()
+    bundle = json.loads(bundle_path.read_text())
+    assert bundle["suite"] == "calibrate"
+    errors = validate_bundle(bundle)
+    assert errors == []
+
+
+def test_bench_calibrate_default_timeout_is_shorter_than_quick(tmp_path):
+    """The slimmed probe's backstop is generous headroom over its ~3-5
+    minute target, not the full suite's 45-minute one."""
+    assert cli.BENCH_CALIBRATE_TIMEOUT_S < cli.BENCH_QUICK_TIMEOUT_S
+
+
+def test_main_dispatches_bench_calibrate(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(
+        cli,
+        "run_bench_calibrate",
+        lambda settings, submit_fn=None: (0, "bundle written to x.json"),
+    )
+
+    assert cli.main(["bench", "calibrate"]) == 0
+    assert "bundle written" in capsys.readouterr().out
 
 
 # ============================================================

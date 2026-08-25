@@ -58,6 +58,7 @@ from hmasync_controller.bench.quick import (
     ModelNotAvailableError,
     NoEngineDetectedError,
     NvmlUnavailableError,
+    run_calibrate_suite,
     run_quick_suite,
 )
 from hmasync_controller.config import (
@@ -816,7 +817,10 @@ def run_bench(
             f"Opted out — BENCH_OPTIN=false written to {env_path}. "
             "No further benchmark data will be sent."
         )
-    return 2, "usage: async-energy-controller bench {opt-in,opt-out,register-node,quick,submit}"
+    return 2, (
+        "usage: async-energy-controller bench "
+        "{opt-in,opt-out,register-node,quick,calibrate,submit}"
+    )
 
 
 # ============================================================
@@ -916,7 +920,8 @@ def _bench_submit_fn(bundle_path: str, settings: Settings) -> tuple[int, str]:
 
 
 # ============================================================
-# bench quick — run the ~25-minute onboarding suite in-process
+# bench quick / bench calibrate — run the onboarding suite (or its slimmed
+# sibling) in-process
 # ============================================================
 #
 # US-MERGE-04: this used to shell out to a separately-installed
@@ -927,8 +932,17 @@ def _bench_submit_fn(bundle_path: str, settings: Settings) -> tuple[int, str]:
 # under `hmasync_controller.bench` (US-MERGE-01..03 ported the pieces;
 # US-MERGE-04 wires them together). The 45-minute timeout is a backstop
 # against a wedged run, not a target, and is injectable for tests.
+#
+# US-MERGE-05 adds `bench calibrate`, the ~3-5 minute slimmed probe: same
+# artifact/bundle/opt-in wiring, so `run_bench_quick`/`run_bench_calibrate`
+# share a private helper below and differ only in which suite coroutine they
+# await, the timeout backstop, and the `suite` value stamped on the bundle.
 
 BENCH_QUICK_TIMEOUT_S = 45 * 60.0
+
+BENCH_CALIBRATE_TIMEOUT_S = 10 * 60.0
+"""Backstop for the ~3-5 minute calibrate probe -- generous headroom over
+the target, not itself a target (same posture as BENCH_QUICK_TIMEOUT_S)."""
 
 
 def _bench_utcnow() -> datetime:
@@ -957,15 +971,19 @@ def _bench_quick_node_fingerprint(settings: Settings) -> dict[str, Any] | None:
         return None
 
 
-def run_bench_quick(
+def _run_bench_suite_cli(
     settings: Settings,
+    suite_result_coro: Any,
     *,
-    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
-    now_fn: Callable[[], datetime] | None = None,
-    timeout_s: float = BENCH_QUICK_TIMEOUT_S,
+    suite: str,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None,
+    now_fn: Callable[[], datetime] | None,
+    timeout_s: float,
 ) -> tuple[int, str]:
-    """Run the onboarding suite in-process; write its artifacts and bundle;
-    hand off to `submit_fn` on opt-in.
+    """Shared body behind `run_bench_quick`/`run_bench_calibrate`: await
+    `suite_result_coro` under a timeout backstop, write per-run artifacts
+    (best-effort), build + write the bundle (stamped `suite`), and hand off
+    to `submit_fn` on opt-in.
 
     `submit_fn` is the seam wired to the real submission client (POST
     /api/v1/bench/submissions, spool-on-failure). An opted-in operator with
@@ -980,9 +998,9 @@ def run_bench_quick(
     `ollama pull ...` command — this box never pulls a model itself).
     """
     try:
-        result = asyncio.run(asyncio.wait_for(run_quick_suite(), timeout=timeout_s))
+        result = asyncio.run(asyncio.wait_for(suite_result_coro, timeout=timeout_s))
     except TimeoutError:
-        return 1, f"bench quick did not finish within {int(timeout_s)}s; no bundle was written"
+        return 1, f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written"
     except ModelNotAvailableError as e:
         return 2, str(e)
     except (NoEngineDetectedError, NvmlUnavailableError, AllTasksFailedError) as e:
@@ -1002,13 +1020,13 @@ def run_bench_quick(
             # the bundle the operator is about to submit -- only the raw,
             # on-disk trace copy is missing, which is a lesser loss.
             logger.warning(
-                "bench quick: could not write the artifact folder for %s: %s",
-                run_metrics.run_id, e,
+                "bench %s: could not write the artifact folder for %s: %s",
+                suite, run_metrics.run_id, e,
             )
 
     node = _bench_quick_node_fingerprint(settings)
     try:
-        bundle = build_bundle(result.runs, node)
+        bundle = build_bundle(result.runs, node, suite=suite)
     except ExportDenylistViolation as e:
         # Defense in depth: `build_bundle`'s own allowlist should make this
         # unreachable in practice (see bench/bundle.py's module docstring),
@@ -1028,6 +1046,52 @@ def run_bench_quick(
         return 0, f"{message}\nbench_optin is set, but no submitter is wired up on this build yet."
     sub_code, sub_message = submit_fn(str(bundle_path), settings)
     return sub_code, f"{message}\n{sub_message}"
+
+
+def run_bench_quick(
+    settings: Settings,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float = BENCH_QUICK_TIMEOUT_S,
+) -> tuple[int, str]:
+    """Run the ~25-minute onboarding suite in-process; write its artifacts
+    and bundle (stamped `suite: "quick"`); hand off to `submit_fn` on
+    opt-in. See `_run_bench_suite_cli` for the full exit-code contract.
+    """
+    return _run_bench_suite_cli(
+        settings,
+        run_quick_suite(),
+        suite="quick",
+        submit_fn=submit_fn,
+        now_fn=now_fn,
+        timeout_s=timeout_s,
+    )
+
+
+def run_bench_calibrate(
+    settings: Settings,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float = BENCH_CALIBRATE_TIMEOUT_S,
+) -> tuple[int, str]:
+    """Run the ~3-5 minute slimmed calibrate probe in-process (US-MERGE-05);
+    write its artifacts and bundle (stamped `suite: "calibrate"`, so a
+    server-side reader never pools it with `bench quick` results); hand off
+    to `submit_fn` on opt-in. Same exit-code contract as `run_bench_quick` --
+    see `_run_bench_suite_cli`. `bench quick` remains the leaderboard-grade,
+    publishable measurement; calibrate exists for the scheduling/cap
+    figures a box needs fast.
+    """
+    return _run_bench_suite_cli(
+        settings,
+        run_calibrate_suite(),
+        suite="calibrate",
+        submit_fn=submit_fn,
+        now_fn=now_fn,
+        timeout_s=timeout_s,
+    )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -1184,7 +1248,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     reg.add_argument("--log-level", default=argparse.SUPPRESS, help="Logging level (default: INFO).")
 
-    # `bench` gathers opt-in/opt-out/register-node/quick/submit.
+    # `bench` gathers opt-in/opt-out/register-node/quick/calibrate/submit.
     bench = sub.add_parser(
         "bench",
         help="Opt in/out of contributing benchmark data to Async Energy.",
@@ -1210,7 +1274,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     bench_sub.add_parser(
         "quick",
-        help="Run the ~25-minute energy-bench quick suite and write a bundle.",
+        help=(
+            "Run the ~25-minute energy-bench quick suite and write a bundle. "
+            "The leaderboard-grade, publishable measurement -- prefer this "
+            "over `calibrate` unless you only need scheduling figures fast."
+        ),
+    )
+    bench_sub.add_parser(
+        "calibrate",
+        help=(
+            "Run a ~3-5 minute slimmed probe (one task plus the power "
+            "sweep's first capped point) and write a bundle marked "
+            "suite=calibrate, never pooled with `quick` results. Use "
+            "`bench quick` for the leaderboard-grade measurement."
+        ),
     )
     bench_submit = bench_sub.add_parser(
         "submit",
@@ -1244,6 +1321,8 @@ def main(argv: list[str] | None = None) -> int:
         bench_sub = getattr(args, "bench_subcommand", None)
         if bench_sub == "quick":
             code, message = run_bench_quick(settings, submit_fn=_bench_submit_fn)
+        elif bench_sub == "calibrate":
+            code, message = run_bench_calibrate(settings, submit_fn=_bench_submit_fn)
         elif bench_sub == "submit":
             code, message = run_bench_submit(settings, args.bundle_path)
         elif bench_sub == "register-node":

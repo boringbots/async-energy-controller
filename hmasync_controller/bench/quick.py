@@ -1,11 +1,14 @@
-"""`bench quick`: the ~25-minute Tier-C onboarding suite, in-process (US-MERGE-04).
+"""`bench quick`/`bench calibrate`: the ~25-minute Tier-C onboarding suite and
+its ~3-5 minute slimmed sibling, in-process (US-MERGE-04, US-MERGE-05).
 
 Ported from energy-bench's `quick.py` + the driving loop in its
-`main.py::execute_quick`, collapsed into ONE module + one async orchestrator
-(`run_quick_suite`) since this package has no separate CLI-printing layer to
-split against -- `cli.py::run_bench_quick` calls straight into this module
-and maps the result/exception to an exit code, the same division of labor
-energy-bench's `main.py`/`quick.py` had.
+`main.py::execute_quick`, collapsed into ONE module + one shared async
+orchestrator (`_run_bench_suite`, driving the two public entry points
+`run_quick_suite`/`run_calibrate_suite`) since this package has no separate
+CLI-printing layer to split against -- `cli.py::run_bench_quick`/
+`run_bench_calibrate` call straight into this module and map the
+result/exception to an exit code, the same division of labor energy-bench's
+`main.py`/`quick.py` had.
 
 ## Why Ollama/llama.cpp, not vLLM
 
@@ -83,6 +86,9 @@ logger = logging.getLogger(__name__)
 # explicit `__all__` below.
 __all__ = [
     "AllTasksFailedError",
+    "CALIBRATE_MAX_SWEEP_POINTS",
+    "CALIBRATE_TASKS",
+    "CALIBRATE_TASK_N_ITEMS",
     "DetectedEngine",
     "ModelNotAvailableError",
     "NoEngineDetectedError",
@@ -99,6 +105,7 @@ __all__ = [
     "QuickTaskRun",
     "detect_engine",
     "resolve_quick_model",
+    "run_calibrate_suite",
     "run_power_sweep",
     "run_quick_suite",
     "run_quick_task",
@@ -449,6 +456,7 @@ async def run_power_sweep(
     n_shot: int | None = None,
     seed: int | None = None,
     caps_w: list[int] | None = None,
+    max_points: int | None = None,
 ) -> tuple[list[PowerSweepPoint], str | None]:
     """Run the mini power sweep's capped points (stock is the baseline pass's
     own `POWER_SWEEP_TASK` run -- not repeated here).
@@ -462,6 +470,15 @@ async def run_power_sweep(
     it. When the stock limit can't be read at all, the sweep is SKIPPED
     outright -- never falls back to a fixed wattage ladder that might not
     even fit this card.
+
+    `max_points` (US-MERGE-05, `bench calibrate`) caps how many of the
+    derived (or explicit `caps_w`) points are actually MEASURED, applied
+    AFTER the short-ladder message above is computed -- a caller that only
+    wants the first point still sees an accurate "this card's own range
+    collapsed the ladder" reason when that is genuinely why, and never a
+    false one manufactured by its own request to stop early. `None` (the
+    default) measures every derived/explicit point, unchanged from before
+    this parameter existed.
 
     Stops at the FIRST cap that fails to confirm: if the first derived cap
     fails (the common case -- SetPowerManagementLimit needs root), the whole
@@ -510,6 +527,9 @@ async def run_power_sweep(
                 f"{MIN_SWEEP_POINTS} points the flexibility metrics need, so "
                 "they stay withheld for this card."
             )
+
+    if max_points is not None:
+        caps = caps[:max_points]
 
     points: list[PowerSweepPoint] = []
 
@@ -616,18 +636,25 @@ def _build_run_metrics(
         return None
 
 
-async def run_quick_suite(
+async def _run_bench_suite(
     *,
-    engine_choice: str | None = None,
-    host: str = "localhost",
-    ollama_port: int = DEFAULT_OLLAMA_PORT,
-    llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
-    target_host: str | None = None,
+    engine_choice: str | None,
+    host: str,
+    ollama_port: int,
+    llamacpp_port: int,
+    target_host: str | None,
+    tasks: list[tuple[str, int]],
+    max_sweep_points: int | None,
+    label_prefix_stem: str,
 ) -> QuickSuiteResult:
-    """Run the onboarding suite end to end, in-process: detect an engine,
-    verify (never pull) the reference model, measure the core-task subset,
-    attempt the mini power sweep, and return everything the CLI layer needs
-    to write artifacts and build a submission bundle.
+    """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
+    (US-MERGE-05): detect an engine, verify (never pull) the reference
+    model, measure `tasks`, attempt the mini power sweep (at most
+    `max_sweep_points` capped points when given), and return everything the
+    CLI layer needs to write artifacts and build a submission bundle. Only
+    WHAT gets measured differs between the two callers -- the detection,
+    restore-in-finally, and error-handling contract below is identical for
+    both, so it lives here once.
 
     Mirrors energy-bench's `main.py::execute_quick` loop, minus what does
     not apply to this package: no collector fallback (there is no
@@ -649,13 +676,15 @@ async def run_quick_suite(
         ModelNotAvailableError: The reference model isn't pulled (Ollama) or
             nothing is loaded at all (llama.cpp).
         NvmlUnavailableError: No local NVML-backed GPU -- this package's one
-            hard hardware requirement for `bench quick`.
-        AllTasksFailedError: Every task in `QUICK_TASKS` failed -- nothing
-            was measured, so there is nothing to bundle.
+            hard hardware requirement for a bench run.
+        AllTasksFailedError: Every task in `tasks` failed -- nothing was
+            measured, so there is nothing to bundle.
     """
     resolved_target_host = target_host or host
 
-    logger.info("bench quick: detecting an inference engine (Ollama, then llama.cpp)...")
+    logger.info(
+        "bench %s: detecting an inference engine (Ollama, then llama.cpp)...", label_prefix_stem
+    )
     detected = await detect_engine(engine_choice, host, ollama_port, llamacpp_port)
     if detected is None:
         which = (
@@ -666,7 +695,7 @@ async def run_quick_suite(
         raise NoEngineDetectedError(
             f"no {which} server answered on {host} "
             f"(tried ollama:{ollama_port}, llamacpp:{llamacpp_port}). Start "
-            "one first -- bench quick never launches an engine itself."
+            f"one first -- bench {label_prefix_stem} never launches an engine itself."
         )
     logger.info("  engine: %s at %s", detected.name, detected.base_url)
 
@@ -689,8 +718,8 @@ async def run_quick_suite(
     skipped_reason: str | None = None
 
     try:
-        for i, (task_name, n_items) in enumerate(QUICK_TASKS, start=1):
-            logger.info("[%d/%d] %s (n=%d)...", i, len(QUICK_TASKS), task_name, n_items)
+        for i, (task_name, n_items) in enumerate(tasks, start=1):
+            logger.info("[%d/%d] %s (n=%d)...", i, len(tasks), task_name, n_items)
             try:
                 task_run = await run_quick_task(
                     vllm_client, telemetry, model.name, task_name, n_items
@@ -715,7 +744,7 @@ async def run_quick_suite(
                 "mini power sweep: stock + up to %d capped point(s) derived from "
                 "this card's own power limit (needs NVML SetPowerManagementLimit "
                 "-- usually root)...",
-                len(POWER_SWEEP_CAPS_W),
+                max_sweep_points if max_sweep_points is not None else len(POWER_SWEEP_CAPS_W),
             )
             try:
                 sweep_points, skipped_reason = await run_power_sweep(
@@ -725,6 +754,7 @@ async def run_quick_suite(
                     n_items=gsm8k_baseline.n_items,
                     n_shot=gsm8k_baseline.n_shot,
                     seed=gsm8k_baseline.seed,
+                    max_points=max_sweep_points,
                 )
             except Exception as e:  # noqa: BLE001 - a sweep failure must not sink the suite
                 skipped_reason = f"power sweep aborted: {e}"
@@ -733,10 +763,7 @@ async def run_quick_suite(
             if skipped_reason and not sweep_points:
                 logger.info("  skipped: %s", skipped_reason)
             else:
-                logger.info(
-                    "  %d/%d capped point(s) measured.",
-                    len(sweep_points), len(POWER_SWEEP_CAPS_W),
-                )
+                logger.info("  %d capped point(s) measured.", len(sweep_points))
                 if skipped_reason:
                     logger.info("  short ladder: %s", skipped_reason)
         else:
@@ -753,7 +780,7 @@ async def run_quick_suite(
     if not task_runs:
         raise AllTasksFailedError("every task failed -- nothing was measured.")
 
-    label_prefix = f"quick_{detected.name.replace('.', '')}"
+    label_prefix = f"{label_prefix_stem}_{detected.name.replace('.', '')}"
     all_task_runs = list(task_runs) + [p.run for p in sweep_points if p.run is not None]
 
     runs: list[RunMetrics] = []
@@ -787,4 +814,78 @@ async def run_quick_suite(
         power_sweep_skipped_reason=skipped_reason,
         runs=runs,
         task_runs=paired_task_runs,
+    )
+
+
+async def run_quick_suite(
+    *,
+    engine_choice: str | None = None,
+    host: str = "localhost",
+    ollama_port: int = DEFAULT_OLLAMA_PORT,
+    llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
+    target_host: str | None = None,
+) -> QuickSuiteResult:
+    """Run the ~25-minute onboarding suite end to end, in-process: the full
+    `QUICK_TASKS` set plus the mini power sweep's full derived ladder. The
+    leaderboard-grade, publishable measurement -- see `_run_bench_suite` for
+    the shared behavior contract (restore-in-finally, exceptions raised).
+    """
+    return await _run_bench_suite(
+        engine_choice=engine_choice,
+        host=host,
+        ollama_port=ollama_port,
+        llamacpp_port=llamacpp_port,
+        target_host=target_host,
+        tasks=QUICK_TASKS,
+        max_sweep_points=None,
+        label_prefix_stem="quick",
+    )
+
+
+CALIBRATE_TASK_N_ITEMS = 15
+"""Item count for calibrate's one task -- the spec's '~15 items'."""
+
+CALIBRATE_TASKS: list[tuple[str, int]] = [(POWER_SWEEP_TASK, CALIBRATE_TASK_N_ITEMS)]
+"""`bench calibrate` measures exactly one decode task -- the same
+`gsm8k_platinum` `run_quick_suite`'s own mini sweep uses as its stock
+(uncapped) point, so this one task IS the sweep's baseline pass, not a
+second measurement of the same thing."""
+
+CALIBRATE_MAX_SWEEP_POINTS = 1
+"""`bench calibrate` keeps only the FIRST derived capped point -- enough for
+the predictor/cap-recommendation figures the spec asks for, without the
+~25-minute cost of `run_quick_suite`'s full three-point ladder."""
+
+
+async def run_calibrate_suite(
+    *,
+    engine_choice: str | None = None,
+    host: str = "localhost",
+    ollama_port: int = DEFAULT_OLLAMA_PORT,
+    llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
+    target_host: str | None = None,
+) -> QuickSuiteResult:
+    """Run the ~3-5 minute slimmed scheduling probe (US-MERGE-05): one
+    decode task (`CALIBRATE_TASKS`, ~15 items) plus the mini power sweep's
+    first capped point only -- not the full `QUICK_TASKS`/three-point ladder
+    `run_quick_suite` measures. Same restore-in-finally guarantee and raised
+    exceptions as `run_quick_suite`; see `_run_bench_suite` for the shared
+    contract -- only WHAT gets measured differs.
+
+    `bench calibrate` is NOT the leaderboard-grade path: it exists so a box
+    that only needs the per-machine figures the predictor and cap
+    recommendation want does not have to sit through the full suite.
+    `bench quick` remains the comparable, publishable measurement -- the
+    CLI layer stamps `suite: "calibrate"` on the bundle this produces so a
+    server-side reader never pools it with `quick` results.
+    """
+    return await _run_bench_suite(
+        engine_choice=engine_choice,
+        host=host,
+        ollama_port=ollama_port,
+        llamacpp_port=llamacpp_port,
+        target_host=target_host,
+        tasks=CALIBRATE_TASKS,
+        max_sweep_points=CALIBRATE_MAX_SWEEP_POINTS,
+        label_prefix_stem="calibrate",
     )
