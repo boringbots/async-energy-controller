@@ -679,6 +679,7 @@ async def _run_bench_suite(
     tasks: list[tuple[str, int]],
     max_sweep_points: int | None,
     label_prefix_stem: str,
+    restore_to_factory_default: bool = True,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -744,15 +745,22 @@ async def _run_bench_suite(
     # means there is nothing this function can measure at all.
     gpu_info = await telemetry.gpu_info()
     engine_version = await detected.adapter.version()
-    # Restore TARGET: the card's factory default, not the limit observed at
-    # start. If a previous run was hard-killed before its own finally ran, the
-    # observed value IS a leftover cap, and faithfully restoring it means the
-    # card never returns to factory. Falls back to the observed limit on a
-    # driver that cannot report a default -- restoring something known beats
-    # guessing a wattage.
-    original_power_limit = await telemetry.get_power_limit_default_w()
+    # BOTH restore candidates, captured BEFORE the sweep touches anything --
+    # after it runs, "what the card is set to" is just the last cap applied.
+    #
+    #   factory default : where "managed" puts the card back, so a cap left by
+    #                     an interrupted earlier run heals here.
+    #   observed        : where "preserve" puts it back, so a cap the operator
+    #                     set themselves survives the benchmark.
+    #
+    # The ladder itself always derives from the factory default regardless of
+    # policy (see `_run_power_sweep`) -- fractions of a leftover cap would walk
+    # the card down further on every aborted run.
+    factory_power_limit = await telemetry.get_power_limit_default_w()
+    observed_power_limit = await telemetry.get_power_limit_w()
+    original_power_limit = factory_power_limit
     if original_power_limit is None:
-        original_power_limit = await telemetry.get_power_limit_w()
+        original_power_limit = observed_power_limit
 
     task_runs: list[QuickTaskRun] = []
     sweep_points: list[PowerSweepPoint] = []
@@ -814,8 +822,19 @@ async def _run_bench_suite(
             )
             logger.info("mini power sweep: skipped (%s)", skipped_reason)
     finally:
-        if original_power_limit is not None:
-            await telemetry.set_power_limit_w(original_power_limit)
+        # `restore_to_factory_default` mirrors the controller's
+        # POWER_CAP_POLICY (config.Settings): True = "managed", the card goes
+        # back to the limit the driver shipped, so a cap left behind by an
+        # interrupted run heals here. False = "preserve", a cap the operator
+        # set themselves survives the benchmark -- at the cost that a leftover
+        # one survives too, because the two are indistinguishable from here.
+        # Both candidates were captured before the sweep ran; re-reading the
+        # card here would return the last cap applied, not its start state.
+        restore_target = original_power_limit
+        if not restore_to_factory_default and observed_power_limit is not None:
+            restore_target = observed_power_limit
+        if restore_target is not None:
+            await telemetry.set_power_limit_w(restore_target)
         telemetry.close()
 
     if not task_runs:
@@ -865,6 +884,7 @@ async def run_quick_suite(
     ollama_port: int = DEFAULT_OLLAMA_PORT,
     llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
     target_host: str | None = None,
+    restore_to_factory_default: bool = True,
 ) -> QuickSuiteResult:
     """Run the ~25-minute onboarding suite end to end, in-process: the full
     `QUICK_TASKS` set plus the mini power sweep's full derived ladder. The
@@ -880,6 +900,7 @@ async def run_quick_suite(
         tasks=QUICK_TASKS,
         max_sweep_points=None,
         label_prefix_stem="quick",
+        restore_to_factory_default=restore_to_factory_default,
     )
 
 
@@ -905,6 +926,7 @@ async def run_calibrate_suite(
     ollama_port: int = DEFAULT_OLLAMA_PORT,
     llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
     target_host: str | None = None,
+    restore_to_factory_default: bool = True,
 ) -> QuickSuiteResult:
     """Run the ~3-5 minute slimmed scheduling probe (US-MERGE-05): one
     decode task (`CALIBRATE_TASKS`, ~15 items) plus the mini power sweep's
@@ -929,4 +951,5 @@ async def run_calibrate_suite(
         tasks=CALIBRATE_TASKS,
         max_sweep_points=CALIBRATE_MAX_SWEEP_POINTS,
         label_prefix_stem="calibrate",
+        restore_to_factory_default=restore_to_factory_default,
     )

@@ -86,12 +86,38 @@ class Settings(BaseSettings):
     # Off by default. When true AND this box has an NVML-backed GPU, the
     # executor polls this node's server-recommended power cap
     # (ApiClient.get_recommended_cap, keyed by node_hash) and applies it via
-    # NVML around each scheduled GPU job, always restoring the prior limit
-    # afterward. A recommendation only exists once this node has contributed
+    # NVML around each scheduled GPU job, restoring afterward per
+    # POWER_CAP_POLICY below. A recommendation only exists once this node has contributed
     # bench data (see NODE_SALT_PATH / BENCH_OPTIN), but requesting one and
     # acting on it is its own opt-in — this flag does not imply BENCH_OPTIN,
     # nor does BENCH_OPTIN imply this.
     APPLY_POWER_CAP: bool = False
+
+    # Who owns this GPU's power limit: you, or this controller.
+    #
+    #   "preserve" (default) -- the controller puts back the EXACT limit it
+    #       found. A cap you set yourself survives every job and every
+    #       benchmark. The cost: if a job is ever killed outright (reboot,
+    #       OOM-kill, SIGKILL) before it can restore, its cap is left behind,
+    #       and the next job reads that leftover cap as the value to put back
+    #       -- so the card stays throttled until someone notices. The
+    #       controller WARNS on every job when it sees a limit below the
+    #       card's factory default, naming both numbers and the recovery
+    #       command, but it will not undo it for you.
+    #
+    #   "managed" -- the controller restores the card's FACTORY DEFAULT
+    #       instead. A leftover cap heals itself on the next job, and the
+    #       benchmark suite's power sweep leaves the card exactly as the
+    #       driver shipped it. The cost: a cap YOU set persistently is reset
+    #       to factory, because from here it is indistinguishable from a
+    #       leftover one.
+    #
+    # The default is "preserve" deliberately: this package is a guest on your
+    # hardware, and silently undoing a setting you chose is a worse failure
+    # than leaving a visible, warned-about one in place. Set "managed" if you
+    # do not set your own cap and would rather the controller keep the card
+    # clean for benchmarking and optimization.
+    POWER_CAP_POLICY: str = "preserve"
 
     model_config = SettingsConfigDict(
         env_file=".env",

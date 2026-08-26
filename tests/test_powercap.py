@@ -270,3 +270,69 @@ def test_restore_still_returns_the_limit_it_found(caplog):
     assert mgr.apply() == STATUS_APPLIED
     assert mgr.restore() == STATUS_RESTORED
     assert profiler._nvml.limit_mw == 200_000
+
+
+# --- POWER_CAP_POLICY: who owns this GPU's power limit ----------------------
+# "preserve" (default) puts back the exact limit apply() found, so an
+# operator's own cap survives. "managed" puts back the card's factory default,
+# so a cap left behind by a killed job heals -- at the cost of resetting a
+# deliberate one, because the two are indistinguishable from here.
+
+
+def _mgr(policy, *, limit_mw, default_mw, cap_w=250.0):
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=limit_mw, default_mw=default_mw))
+    mgr = PowerCapManager(
+        client=FakeClient(cap_w=cap_w), profiler=profiler, node_hash="n1", policy=policy
+    )
+    return mgr, profiler
+
+
+def test_preserve_restores_the_operators_own_cap():
+    mgr, profiler = _mgr("preserve", limit_mw=300_000, default_mw=350_000)
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 300_000, "a deliberate cap must survive"
+
+
+def test_managed_restores_the_factory_default():
+    mgr, profiler = _mgr("managed", limit_mw=300_000, default_mw=350_000)
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 350_000, "a leftover cap must heal"
+
+
+def test_managed_falls_back_to_the_found_limit_without_a_readable_default():
+    """Rule 3: restoring something known beats guessing a wattage."""
+    mgr, profiler = _mgr("managed", limit_mw=300_000, default_mw=None)
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 300_000
+
+
+def test_default_policy_is_preserve():
+    """Unset config must not silently undo an operator's setting."""
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=300_000, default_mw=350_000))
+    mgr = PowerCapManager(client=FakeClient(cap_w=250.0), profiler=profiler, node_hash="n1")
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 300_000
+
+
+def test_unknown_policy_falls_back_to_preserve_with_a_warning(caplog):
+    """A typo in .env must not stop scheduled work."""
+    with caplog.at_level("WARNING"):
+        mgr, profiler = _mgr("managd", limit_mw=300_000, default_mw=350_000)
+    assert any("unknown POWER_CAP_POLICY" in r.getMessage() for r in caplog.records)
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 300_000
+
+
+def test_managed_says_so_instead_of_warning(caplog):
+    """Under "managed" an already-capped card is going to be fixed, so it is
+    an INFO note, not the "your card is stuck" warning."""
+    mgr, _profiler = _mgr("managed", limit_mw=200_000, default_mw=350_000)
+    with caplog.at_level("INFO"):
+        assert mgr.apply() == STATUS_APPLIED
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("managed" in r.getMessage() for r in caplog.records)

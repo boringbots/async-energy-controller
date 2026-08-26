@@ -62,9 +62,9 @@ Worth stating before you give anything a systemd unit:
   default** — not whatever the limit happened to be when it started, which
   would silently re-apply a cap left behind by an earlier interrupted run. A
   cap only throttles and never damages, but a card left quietly throttled is
-  its own kind of harm. (The separate `APPLY_POWER_CAP` path for scheduled
-  jobs restores the limit it found instead — see
-  [Hardware safety](HARDWARE-SAFETY.md) for exactly which call restores what.)
+  its own kind of harm. Which limit counts as "as we found it" is yours to
+  set — see [`POWER_CAP_POLICY`](#who-owns-your-gpus-power-limit--power_cap_policy)
+  and [Hardware safety](HARDWARE-SAFETY.md).
 
 ---
 
@@ -96,7 +96,7 @@ first](https://async.energy/quickstart/), it takes about five minutes and is all
 Create a `.env` next to where you will run the controller:
 
 ```bash
-cp.env.example.env
+cp .env.example .env
 ```
 
 ```ini
@@ -473,9 +473,39 @@ need scheduling figures fast.
 - **A tuned power cap.** Set `APPLY_POWER_CAP=true` in `.env` (a separate
   opt-in from `bench opt-in` — one shares data, the other acts on a
   recommendation) and, once this node has a recommendation on file, the
-  controller applies it via NVML around each scheduled GPU job and always
-  restores the prior limit afterward, logging what it did. No recommendation
-  yet, or no permission to set one, is never an error — the job runs uncapped.
+  controller applies it via NVML around each scheduled GPU job and restores it
+  afterward, logging what it did. No recommendation yet, or no permission to
+  set one, is never an error — the job runs uncapped.
+
+### Who owns your GPU's power limit — `POWER_CAP_POLICY`
+
+Both the scheduler and the benchmark suite lower the board power limit and put
+it back. What "back" means is your call:
+
+```bash
+POWER_CAP_POLICY=preserve   # default
+POWER_CAP_POLICY=managed
+```
+
+**`preserve`** puts back the exact limit that was there. A cap you set
+yourself survives every job and every benchmark. The cost: if a job is ever
+killed outright — reboot, OOM-kill, `kill -9` — before it can restore, its cap
+is left behind, and the next job reads that leftover cap as the value to put
+back. Your card stays throttled until someone notices. The controller warns on
+every job when it sees a limit below the card's factory default, naming both
+numbers and the `nvidia-smi -pl` recovery, but it will not undo it for you.
+
+**`managed`** puts back the card's factory default instead. A leftover cap
+heals itself on the next job, and a benchmark leaves the card exactly as the
+driver shipped it. The cost: a cap *you* set persistently gets reset to
+factory, because from the controller's side a deliberate cap and a leftover
+one look identical.
+
+Pick `preserve` if you tune your own card — for noise, heat, or a shared power
+budget. Pick `managed` if you don't, and would rather the controller keep the
+card clean for benchmarking and optimization. The default is `preserve`
+because silently undoing a setting you chose is a worse failure than leaving a
+visible, warned-about one in place.
 
 ## How energy gets measured
 

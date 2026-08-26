@@ -386,10 +386,15 @@ def quick_run(run_dir, patch, engine_mock, dataset_fixtures, nvml_mock, loopback
     patch.setattr(
         cli,
         "run_quick_suite",
-        lambda: real_run_quick_suite(
+        # **kw so the stub keeps accepting whatever the CLI passes through
+        # (currently `restore_to_factory_default`, from POWER_CAP_POLICY) --
+        # a positional-only lambda made this fixture a second place to edit
+        # every time the suite gained a parameter.
+        lambda **kw: real_run_quick_suite(
             engine_choice="ollama",
             host="127.0.0.1",
             ollama_port=engine_mock.port,
+            **kw,
         ),
     )
 

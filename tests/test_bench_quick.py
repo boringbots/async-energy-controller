@@ -1136,3 +1136,56 @@ class TestPowerLimitRestoreTarget:
 
         assert reason is None
         assert [p.requested_w for p in points] == [340, 300, 260]
+
+
+class TestBenchRestorePolicy:
+    """`restore_to_factory_default` mirrors the controller's
+    POWER_CAP_POLICY on the benchmark path, so one setting governs both
+    places this package touches the power limit."""
+
+    def _run_suite(self, telemetry, **kw):
+        engine, model = _suite_engine_and_model()
+
+        async def _detect(*a, **k):
+            return engine
+
+        async def _resolve(*a, **k):
+            return model
+
+        async def _fake_run_quick_task(
+            vllm_client, telemetry_arg, model_name, task_name, n_items, **k
+        ):
+            return _fake_task_run(task_name, n_items, power_limit_w=k.get("power_limit_w"))
+
+        with (
+            patch("hmasync_controller.bench.quick.detect_engine", _detect),
+            patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
+            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.VLLMClient"),
+            patch("hmasync_controller.bench.quick.run_quick_task", _fake_run_quick_task),
+        ):
+            _run(run_quick_suite(**kw))
+
+        return [c.args[0] for c in telemetry.set_power_limit_w.await_args_list]
+
+    def test_managed_restores_the_factory_default(self):
+        # Card sitting at a 200 W cap; factory default 350 W.
+        telemetry = _suite_telemetry(stock_w=200, default_w=350)
+        restored = self._run_suite(telemetry, restore_to_factory_default=True)
+        assert restored[-1] == 350
+
+    def test_preserve_restores_what_the_card_was_set_to(self):
+        """And specifically NOT the last cap the sweep applied -- the observed
+        limit has to be captured BEFORE the sweep runs, or "preserve" would
+        faithfully preserve the benchmark's own final rung."""
+        telemetry = _suite_telemetry(stock_w=200, default_w=350)
+        restored = self._run_suite(telemetry, restore_to_factory_default=False)
+        assert restored[-1] == 200, (
+            f"restored {restored[-1]}W -- preserve must put back the card's start state, "
+            "not a value re-read after the sweep capped it"
+        )
+
+    def test_default_is_factory_default(self):
+        telemetry = _suite_telemetry(stock_w=200, default_w=350)
+        restored = self._run_suite(telemetry)
+        assert restored[-1] == 350

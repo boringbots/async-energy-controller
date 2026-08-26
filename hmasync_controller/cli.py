@@ -73,7 +73,7 @@ from hmasync_controller.fingerprint import (
     compute_node_hash,
     load_or_create_salt,
 )
-from hmasync_controller.powercap import PowerCapManager
+from hmasync_controller.powercap import POLICY_MANAGED, PowerCapManager
 from hmasync_controller.profiler import NVMLProfiler, Profiler, get_profiler
 from hmasync_controller.reporter import RunReporter
 from hmasync_controller.spool import Spool
@@ -380,7 +380,12 @@ def build_executor(
     power_cap = None
     if settings.APPLY_POWER_CAP and isinstance(profiler, NVMLProfiler):
         node_hash = compute_node_hash(load_or_create_salt(settings.NODE_SALT_PATH))
-        power_cap = PowerCapManager(client=client, profiler=profiler, node_hash=node_hash)
+        power_cap = PowerCapManager(
+            client=client,
+            profiler=profiler,
+            node_hash=node_hash,
+            policy=settings.POWER_CAP_POLICY,
+        )
 
     return ScheduleExecutor(
         client=client,
@@ -1048,6 +1053,19 @@ def _run_bench_suite_cli(
     return sub_code, f"{message}\n{sub_message}"
 
 
+def _bench_restore_to_factory_default(settings: Settings) -> bool:
+    """Whether the bench suite should leave the card at its FACTORY DEFAULT.
+
+    One setting governs both places this package touches the power limit:
+    POWER_CAP_POLICY="managed" means the controller owns it (leftover caps
+    heal), "preserve" means the operator does (their own cap survives). An
+    unrecognised value is treated as "preserve" -- the choice that cannot
+    surprise anyone -- and `PowerCapManager` logs the typo on the scheduling
+    path.
+    """
+    return settings.POWER_CAP_POLICY == POLICY_MANAGED
+
+
 def run_bench_quick(
     settings: Settings,
     *,
@@ -1061,7 +1079,9 @@ def run_bench_quick(
     """
     return _run_bench_suite_cli(
         settings,
-        run_quick_suite(),
+        run_quick_suite(
+            restore_to_factory_default=_bench_restore_to_factory_default(settings)
+        ),
         suite="quick",
         submit_fn=submit_fn,
         now_fn=now_fn,
@@ -1086,7 +1106,9 @@ def run_bench_calibrate(
     """
     return _run_bench_suite_cli(
         settings,
-        run_calibrate_suite(),
+        run_calibrate_suite(
+            restore_to_factory_default=_bench_restore_to_factory_default(settings)
+        ),
         suite="calibrate",
         submit_fn=submit_fn,
         now_fn=now_fn,

@@ -47,6 +47,11 @@ STATUS_SKIPPED_NO_GPU = "skipped-no-gpu"
 STATUS_SKIPPED_ERROR = "skipped-error"
 STATUS_NOTHING_TO_RESTORE = "nothing-to-restore"
 
+#: Who owns the GPU's power limit. See `config.Settings.POWER_CAP_POLICY`.
+POLICY_PRESERVE = "preserve"
+POLICY_MANAGED = "managed"
+_VALID_POLICIES = (POLICY_PRESERVE, POLICY_MANAGED)
+
 
 def _extract_cap_w(data: Any) -> float | None:
     """Pull the recommended cap (watts) out of a recommended-cap response body.
@@ -79,7 +84,21 @@ class PowerCapManager:
         tolerance_pct: float = 5.0,
         cache_ttl_s: float = DEFAULT_CACHE_TTL_S,
         clock: Callable[[], float] | None = None,
+        policy: str = POLICY_PRESERVE,
     ):
+        # An unrecognised policy falls back to "preserve" with a warning
+        # rather than failing the job: a typo in .env must not stop scheduled
+        # work, and "put back exactly what was there" is the choice that
+        # cannot surprise anyone.
+        if policy not in _VALID_POLICIES:
+            logger.warning(
+                "power cap: unknown POWER_CAP_POLICY %r; falling back to %r. Valid values: %s",
+                policy,
+                POLICY_PRESERVE,
+                ", ".join(_VALID_POLICIES),
+            )
+            policy = POLICY_PRESERVE
+        self._policy = policy
         self._client = client
         self._profiler = profiler
         self._node_hash = node_hash
@@ -159,31 +178,60 @@ class PowerCapManager:
         # apart. See HARDWARE-SAFETY.md, "Known limitation".
         default_w = self._profiler.get_power_limit_default_w()
         if default_w is not None and prior < default_w:
-            logger.warning(
-                "power cap: this GPU was ALREADY capped at %.0fW before the job started "
-                "(card's factory default is %.0fW). If you did not set that yourself it was "
-                "probably left behind by a job that was killed before it could restore, and "
-                "every run since has been throttled. Restore with: nvidia-smi -pl %.0f",
-                prior,
-                default_w,
-                default_w,
-            )
+            if self._policy == POLICY_MANAGED:
+                logger.info(
+                    "power cap: GPU was at %.0fW before this job (factory default %.0fW); "
+                    "POWER_CAP_POLICY=managed, so it will be restored to %.0fW afterward.",
+                    prior,
+                    default_w,
+                    default_w,
+                )
+            else:
+                logger.warning(
+                    "power cap: this GPU was ALREADY capped at %.0fW before the job started "
+                    "(card's factory default is %.0fW), and POWER_CAP_POLICY=preserve means "
+                    "that %.0fW is what gets put back. If you set that cap yourself, nothing "
+                    "is wrong. If you did not, it was probably left behind by a job killed "
+                    "before it could restore, and every run since has been throttled -- set "
+                    "POWER_CAP_POLICY=managed to have the controller restore the factory "
+                    "default from now on, or fix it once with: nvidia-smi -pl %.0f",
+                    prior,
+                    default_w,
+                    prior,
+                    default_w,
+                )
         return STATUS_APPLIED
 
     def restore(self) -> str:
-        """Restore the limit `apply()` overwrote, if it overwrote one. Never raises."""
+        """Put the power limit back, per `POWER_CAP_POLICY`. Never raises.
+
+        "preserve" restores the exact limit `apply()` found -- a cap the
+        operator set themselves survives. "managed" restores the card's
+        factory default instead, so a cap left behind by a killed job heals
+        on the next run; the trade is that a deliberate operator cap is reset
+        too, because the two are indistinguishable from here.
+
+        Falls back to the found limit whenever the factory default cannot be
+        read: restoring something known beats guessing a wattage.
+        """
         prior = self._prior_limit_w
         self._prior_limit_w = None
         if prior is None:
             return STATUS_NOTHING_TO_RESTORE
 
+        target = prior
+        if self._policy == POLICY_MANAGED:
+            default_w = self._profiler.get_power_limit_default_w()
+            if default_w is not None:
+                target = default_w
+
         try:
-            self._profiler.set_power_limit_w(prior)
+            self._profiler.set_power_limit_w(target)
         except Exception:
             logger.warning(
-                "power cap: failed to restore the prior %.0fW limit", prior, exc_info=True
+                "power cap: failed to restore the %.0fW limit", target, exc_info=True
             )
             return STATUS_SKIPPED_ERROR
 
-        logger.info("power cap: restored %.0fW", prior)
+        logger.info("power cap: restored %.0fW (policy=%s)", target, self._policy)
         return STATUS_RESTORED
