@@ -292,6 +292,12 @@ def nvml_mock(patch):
     # stock (the bug US-MERGE-04 found in a sibling fixture).
     state = {"limit_mw": 300_000}
     pynvml.nvmlDeviceGetPowerManagementLimit.side_effect = lambda h: state["limit_mw"]
+    # The card's FACTORY DEFAULT, which is what the suite restores TO and what
+    # the fraction ladder is derived FROM -- deliberately a fixed value, unlike
+    # the readback above, because a factory default does not move when a cap is
+    # applied. That is the whole point: restoring the CURRENT limit would put
+    # back a leftover cap from a hard-killed previous run.
+    pynvml.nvmlDeviceGetPowerManagementDefaultLimit.side_effect = lambda h: 300_000
 
     def _set_limit(h, mw):
         state["limit_mw"] = mw

@@ -90,6 +90,27 @@ def compute_flexibility_metrics(runs: list[RunMetrics] | list[dict]) -> dict:
     if n_points < MIN_SWEEP_POINTS:
         return {**_EMPTY_RESULT, "n_points": n_points}
 
+    # COLD-CACHE ONLY (2026-08-26). vLLM runs with `enable_prefix_caching=True`
+    # and the hit rate climbs across successive runs against one server
+    # (measured: 0.0% -> 73.5% -> 80.4% -> 83.1% -> 85.1% -> 85.8%), so
+    # repeats are not independent samples -- they measure cache warmth. Two
+    # concrete failures that filtering fixes:
+    #
+    #   * `knee_savings_pct` takes the SINGLE lowest-J/token capped run, which
+    #     with repeats is always the most cache-discounted warm one. On the
+    #     first real sweep it reported 58.6% where the cold-cache figure is
+    #     ~27%, and that number is quoted verbatim in a "publishable claim".
+    #   * `stock_candidates` counts every uncapped REPEAT, so an uncapped
+    #     point measured 3 times looked like 3 ambiguous stock points and made
+    #     the whole computation withhold.
+    #
+    # Falls back to all runs when none carry a repeat index, so a
+    # single-run-per-cap sweep (the community `bench quick` shape) is
+    # unaffected.
+    cold_runs = [r for r in runs if (_field(r, "repeat_index") or 0) == 0]
+    if cold_runs:
+        runs = cold_runs
+
     stock_candidates = [r for r in runs if _field(r, "power_limit_w") is None]
     if len(stock_candidates) > 1:
         # More than one uncapped point in the group -- which one is "stock"

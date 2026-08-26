@@ -524,7 +524,15 @@ async def run_power_sweep(
     if caps_w is not None:
         caps = caps_w
     else:
-        stock_w = await telemetry.get_power_limit_w()
+        # The card's FACTORY DEFAULT, falling back to whatever it is set to
+        # now only if NVML cannot report the default. Deriving fractions from
+        # the CURRENT limit means a leftover cap from a hard-killed previous
+        # run becomes the new baseline, and each aborted run walks the ladder
+        # further down someone's card. See
+        # `GpuSampler.get_power_limit_default_w`.
+        stock_w = await telemetry.get_power_limit_default_w()
+        if stock_w is None:
+            stock_w = await telemetry.get_power_limit_w()
         if stock_w is None:
             return [], (
                 "could not read the card's stock power limit -- skipped the "
@@ -736,7 +744,15 @@ async def _run_bench_suite(
     # means there is nothing this function can measure at all.
     gpu_info = await telemetry.gpu_info()
     engine_version = await detected.adapter.version()
-    original_power_limit = await telemetry.get_power_limit_w()
+    # Restore TARGET: the card's factory default, not the limit observed at
+    # start. If a previous run was hard-killed before its own finally ran, the
+    # observed value IS a leftover cap, and faithfully restoring it means the
+    # card never returns to factory. Falls back to the observed limit on a
+    # driver that cannot report a default -- restoring something known beats
+    # guessing a wattage.
+    original_power_limit = await telemetry.get_power_limit_default_w()
+    if original_power_limit is None:
+        original_power_limit = await telemetry.get_power_limit_w()
 
     task_runs: list[QuickTaskRun] = []
     sweep_points: list[PowerSweepPoint] = []

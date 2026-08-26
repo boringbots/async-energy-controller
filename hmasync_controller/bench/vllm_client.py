@@ -51,6 +51,44 @@ class VLLMStreamingError(VLLMUnavailableError):
     pass
 
 
+def _message_text(message: dict) -> str:
+    """The assistant's answer text, tolerating reasoning models that split
+    their output across channels.
+
+    A harmony/reasoning model served by vLLM returns TWO fields: `content`
+    (the final answer) and `reasoning` / `reasoning_content` (the chain of
+    thought). Reading `content` alone is correct for an ordinary model and
+    silently catastrophic for a reasoning one -- measured on gpt-oss-20b
+    2026-08-26, gpqa_diamond items generated 87-512 tokens and returned an
+    EMPTY content string, because the whole budget went to the reasoning
+    channel and no final channel was ever emitted. Every such item scored
+    incorrect, dragging the model to 0.15 on a 4-choice task: BELOW the 0.25
+    chance floor, which is the signature of a parsing failure rather than a
+    weak model. The energy numbers were real throughout -- the work happened,
+    only the answer was invisible.
+
+    Prefer `content`. Fall back to the reasoning channel ONLY when content is
+    empty: if the model expressed its conclusion nowhere else, that text is
+    the best evidence of its answer, and the letter/number extractors already
+    scan for a concluding statement ("...so the answer is B"). When content
+    has anything at all, the reasoning is a scratchpad and must NOT override
+    it.
+    """
+    content = (message.get("content") or "").strip()
+    if content:
+        return content
+    for key in ("reasoning", "reasoning_content"):
+        fallback = (message.get(key) or "").strip()
+        if fallback:
+            # Deliberately silent: this module has no logger, and a per-item
+            # log line would fire on every request of a reasoning-model run.
+            # The condition is visible in the data instead -- a run whose
+            # answers came only from the reasoning channel shows up as
+            # accuracy at or below chance if the fallback is ever removed.
+            return fallback
+    return ""
+
+
 class VLLMClient:
     """Async HTTP client for an OpenAI-compatible inference server.
 
@@ -358,7 +396,7 @@ class VLLMClient:
                 completion_tokens = usage.get("completion_tokens", 0)
 
                 choices = data.get("choices", [])
-                text = choices[0].get("message", {}).get("content", "") if choices else ""
+                text = _message_text(choices[0].get("message", {})) if choices else ""
                 finish_reason = choices[0].get("finish_reason") if choices else None
                 t_end_s = time.time()
 

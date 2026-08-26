@@ -207,9 +207,17 @@ class _FakeTask:
         return completion.strip() == item.target
 
 
+_UNSET = object()
+
+
 class _FakeTelemetry:
-    def __init__(self, samples, stock_w=None, min_w=None, max_w=None):
+    def __init__(self, samples, stock_w=None, min_w=None, max_w=None, default_w=_UNSET):
+        # `stock_w` is this fake card's FACTORY DEFAULT, which is what both the
+        # restore target and the fraction ladder read. `default_w` overrides it
+        # independently so a test can model the dangerous case: a card sitting
+        # at a leftover cap whose factory default is higher.
         self._samples = samples
+        self._default_w = stock_w if default_w is _UNSET else default_w
         self.rapl_max_energy_range_uj = None
         self.rapl_dram_max_energy_range_uj = None
         self.start_calls: list[str] = []
@@ -225,6 +233,9 @@ class _FakeTelemetry:
 
     async def get_power_limit_w(self):
         return self._stock_w
+
+    async def get_power_limit_default_w(self):
+        return self._default_w
 
     async def get_power_limit_constraints_w(self):
         return self._min_w, self._max_w
@@ -728,7 +739,7 @@ def _suite_engine_and_model():
     return engine, model
 
 
-def _suite_telemetry(*, stock_w=None, min_w=None, max_w=None):
+def _suite_telemetry(*, stock_w=None, min_w=None, max_w=None, default_w=_UNSET):
     telemetry = MagicMock()
     telemetry.gpu_info = AsyncMock(
         return_value={
@@ -737,6 +748,13 @@ def _suite_telemetry(*, stock_w=None, min_w=None, max_w=None):
         }
     )
     telemetry.get_power_limit_w = AsyncMock(return_value=stock_w)
+    # `stock_w` doubles as this fake card's FACTORY DEFAULT, which is what the
+    # restore target and the fraction ladder actually read. `default_w`
+    # overrides it independently so a test can model the dangerous case: a card
+    # sitting at a leftover cap whose factory default is higher.
+    telemetry.get_power_limit_default_w = AsyncMock(
+        return_value=stock_w if default_w is _UNSET else default_w
+    )
     telemetry.get_power_limit_constraints_w = AsyncMock(return_value=(min_w, max_w))
     # Echoes the requested watts back, like a real NVML readback confirming
     # an already-clamped request -- NOT a fixed `stock_w` return, which would
@@ -1039,3 +1057,82 @@ class TestRunCalibrateSuite:
 
         telemetry.set_power_limit_w.assert_awaited_once_with(300)
         telemetry.close.assert_called_once()
+
+
+class TestPowerLimitRestoreTarget:
+    """The card must come back to its FACTORY DEFAULT, not to whatever it was
+    set to when the suite started.
+
+    This runs on strangers' machines. The suite caps the card and restores in
+    a `finally`; if a PREVIOUS run was hard-killed before its own restore ran
+    (SIGKILL, OOM-killer, a removed container), the card is still capped when
+    the next one starts. Reading the current limit as "stock" then means the
+    suite faithfully puts the leftover cap back AND derives its fraction
+    ladder from the depressed baseline -- so every aborted run walks someone's
+    GPU further down and nothing ever puts it back. A cap only throttles and
+    never damages, but leaving a stranger's card quietly throttled is its own
+    harm.
+    """
+
+    def _run_suite_with(self, telemetry):
+        engine, model = _suite_engine_and_model()
+
+        async def _detect(*a, **kw):
+            return engine
+
+        async def _resolve(*a, **kw):
+            return model
+
+        async def _fake_run_quick_task(
+            vllm_client, telemetry_arg, model_name, task_name, n_items, **kw
+        ):
+            return _fake_task_run(task_name, n_items, power_limit_w=kw.get("power_limit_w"))
+
+        with (
+            patch("hmasync_controller.bench.quick.detect_engine", _detect),
+            patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
+            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.VLLMClient"),
+            patch("hmasync_controller.bench.quick.run_quick_task", _fake_run_quick_task),
+        ):
+            _run(run_quick_suite())
+
+        return [c.args[0] for c in telemetry.set_power_limit_w.await_args_list]
+
+    def test_restores_the_factory_default_not_a_leftover_cap(self):
+        # Card sitting at a 200 W leftover cap; its factory default is 350 W.
+        restored = self._run_suite_with(_suite_telemetry(stock_w=200, default_w=350))
+
+        assert restored, "teardown never restored a power limit at all"
+        assert restored[-1] == 350, (
+            f"restored to {restored[-1]}W -- re-applying the 200W leftover cap instead of "
+            "the card's 350W factory default is exactly the ratchet this prevents"
+        )
+
+    def test_falls_back_to_the_observed_limit_when_no_default_is_reported(self):
+        """Rule 3: a driver that cannot report a factory default gets the
+        observed limit restored, never a guessed wattage."""
+        restored = self._run_suite_with(_suite_telemetry(stock_w=275, default_w=None))
+
+        assert restored and restored[-1] == 275
+
+    def test_the_fraction_ladder_derives_from_the_default_not_the_current_cap(self):
+        """A ladder computed from an already-capped baseline walks further
+        down on every aborted run. Fractions must come off the factory
+        default: 0.85/0.75/0.65 of 400 W, NOT of the 200 W leftover cap
+        (which would have given 170/150/130)."""
+        telemetry = _FakeTelemetry(
+            _samples(2), stock_w=200, default_w=400, min_w=100, max_w=400
+        )
+        telemetry.set_power_limit_w = AsyncMock(side_effect=[340, 300, 260])
+        fake_run = MagicMock()
+
+        with patch(
+            "hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(return_value=fake_run)
+        ):
+            points, reason = _run(
+                run_power_sweep(AsyncMock(), telemetry, "some-model", n_items=25)
+            )
+
+        assert reason is None
+        assert [p.requested_w for p in points] == [340, 300, 260]

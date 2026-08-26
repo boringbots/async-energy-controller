@@ -195,6 +195,31 @@ class LocalNvmlSampler:
         except Exception:  # noqa: BLE001 - best-effort, mirrors runner's original-limit fetch
             return None
 
+    async def get_power_limit_default_w(self) -> int | None:
+        """The card's FACTORY DEFAULT power limit in watts, via
+        `nvmlDeviceGetPowerManagementDefaultLimit` -- NOT
+        `get_power_limit_w()`, which returns whatever the card is set to right
+        now.
+
+        This distinction is a hardware-safety one, not a cosmetic one. The
+        suite caps the card and restores in a `finally`; if a PREVIOUS run was
+        hard-killed before its own restore ran, the card is still capped when
+        this one starts. Reading the current limit as "stock" then means the
+        suite restores the leftover cap and derives its fraction ladder
+        (`POWER_SWEEP_CAPS_W`) from the depressed baseline -- so each aborted
+        run walks a stranger's GPU further down, and nothing ever puts it back.
+        A cap only throttles and never damages, but leaving someone's card
+        quietly throttled is its own harm.
+
+        None on any NVML failure (Rule 3 -- never guess); callers fall back to
+        the observed limit, which is still better than a guessed wattage.
+        """
+        try:
+            h = self._ensure_handle()
+            return int(self._pynvml.nvmlDeviceGetPowerManagementDefaultLimit(h) // 1000)
+        except Exception:  # noqa: BLE001 - best-effort, see get_power_limit_w
+            return None
+
     async def get_power_limit_constraints_w(self) -> tuple[int | None, int | None]:
         """Card's supported power-limit range in watts, via
         `nvmlDeviceGetPowerManagementLimitConstraints`. Both None on any NVML
