@@ -14,7 +14,7 @@ failure rather than a weak model. The energy numbers were real throughout:
 the work happened, only the answer was invisible.
 """
 
-from hmasync_controller.bench.vllm_client import _message_text
+from hmasync_controller.bench.vllm_client import _delta_reasoning, _message_text
 
 
 class TestReasoningChannelFallback:
@@ -56,3 +56,32 @@ class TestReasoningChannelFallback:
 
     def test_content_is_stripped(self):
         assert _message_text({"content": "  B \n"}) == "B"
+
+
+class TestStreamingReasoningChannel:
+    """The STREAMING path is the one `runner.py` actually uses -- every wave
+    row carries `streaming_used=True`. Fixing only the non-streaming path
+    looked correct in a direct probe and changed nothing in a real run:
+    gpt-oss-20b's gpqa_diamond stayed at 0.13, still below the 0.25 chance
+    floor, because the runner never went through `message.content` at all.
+    """
+
+    def test_reads_the_streamed_reasoning_channel(self):
+        assert _delta_reasoning({"delta": {"reasoning": "so the answer is B"}}) == (
+            "so the answer is B"
+        )
+
+    def test_reads_the_reasoning_content_alias(self):
+        assert _delta_reasoning({"delta": {"reasoning_content": "answer: C"}}) == (
+            "answer: C"
+        )
+
+    def test_no_reasoning_channel_returns_none(self):
+        """None, not "" -- the loop distinguishes "no token this chunk" from
+        "a token whose text is empty" when timing TTFT."""
+        assert _delta_reasoning({"delta": {"content": "B"}}) is None
+        assert _delta_reasoning({"delta": {}}) is None
+        assert _delta_reasoning({}) is None
+
+    def test_content_chunks_are_not_mistaken_for_reasoning(self):
+        assert _delta_reasoning({"delta": {"content": "not reasoning"}}) is None

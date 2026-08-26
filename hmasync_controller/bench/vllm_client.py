@@ -51,6 +51,23 @@ class VLLMStreamingError(VLLMUnavailableError):
     pass
 
 
+def _delta_reasoning(choice: dict) -> str | None:
+    """The reasoning-channel text of one streamed chunk, if any.
+
+    Mirrors `_message_text`'s fallback for the streaming path. vLLM streams a
+    reasoning model's chain of thought on `delta.reasoning` (or
+    `delta.reasoning_content` depending on version/parser) and may never emit
+    a `delta.content` token at all -- which is how gpt-oss-20b streamed
+    hundreds of tokens and returned an empty string.
+    """
+    delta = choice.get("delta") or {}
+    for key in ("reasoning", "reasoning_content"):
+        piece = delta.get(key)
+        if piece:
+            return piece
+    return None
+
+
 def _message_text(message: dict) -> str:
     """The assistant's answer text, tolerating reasoning models that split
     their output across channels.
@@ -215,6 +232,13 @@ class VLLMClient:
             "stream_options": {"include_usage": True},
         }
         text_parts: list[str] = []
+        # Reasoning models stream their chain of thought on a SEPARATE channel
+        # (`delta.reasoning` / `delta.reasoning_content`) and may never emit a
+        # `delta.content` token at all. Accumulated separately so the primary
+        # channel still wins when it exists -- the reasoning channel is a
+        # scratchpad that routinely names options the model is REJECTING.
+        # See `_message_text` for the non-streaming counterpart.
+        fallback_parts: list[str] = []
         finish_reason: str | None = None
         prompt_tokens = 0
         completion_tokens = 0
@@ -261,14 +285,23 @@ class VLLMClient:
                         if reason:
                             finish_reason = reason
                         piece = extract_text(choice)
-                        if piece:
+                        fallback_piece = _delta_reasoning(choice)
+                        # TTFT/ITL time GENERATION, not one channel of it: a
+                        # reasoning token is a token the GPU produced and is
+                        # counted in `completion_tokens`. Timing only content
+                        # tokens reported ttft=None (-> 0.0) for a response
+                        # that streamed hundreds of reasoning tokens first.
+                        if piece or fallback_piece:
                             now = time.perf_counter()
                             if ttft_s is None:
                                 ttft_s = now - send_perf
                             elif last_token_perf is not None:
                                 itl_gaps_ms.append((now - last_token_perf) * 1000.0)
                             last_token_perf = now
+                        if piece:
                             text_parts.append(piece)
+                        if fallback_piece:
+                            fallback_parts.append(fallback_piece)
         except httpx.TimeoutException as e:
             raise VLLMTimeoutError(
                 f"Streaming request timed out after {self.timeout}s"
@@ -276,8 +309,17 @@ class VLLMClient:
         except httpx.RequestError as e:
             raise VLLMUnavailableError(f"unreachable at {self.base_url}: {e}") from e
 
+        # Same precedence as the non-streaming `_message_text`: the primary
+        # channel wins whenever it produced anything, and the reasoning channel
+        # is used only when it did not. Keeping the two paths identical matters
+        # -- otherwise the same run scores differently depending on whether
+        # streaming was used, which is a config detail, not a measurement.
+        text = "".join(text_parts).strip()
+        if not text:
+            text = "".join(fallback_parts).strip()
+
         return (
-            "".join(text_parts),
+            text,
             finish_reason,
             prompt_tokens,
             completion_tokens,
