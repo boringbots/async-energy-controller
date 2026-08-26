@@ -12,6 +12,13 @@ decides, and talks to exactly one host. All the intelligence — price curves,
 energy prediction, placement — lives server-side. This package is the part that
 runs on your hardware, which is exactly why it is the part you can read.
 
+**The same install also carries a GPU energy benchmark suite.** `bench quick`
+measures what your hardware costs per unit of useful work — joules per correct
+answer and per token, across a set of standard tasks — against whichever
+inference server you already run. Use it on its own to compare models,
+quantizations and power caps on your box, with or without an Async Energy
+account. Details under [Optimize + contribute](#optimize--contribute).
+
 ```
                         ┌─────────────────────────────┐
    api.async.energy ───▶│  schedule: run wf_a1b2 at   │
@@ -50,6 +57,14 @@ Worth stating before you give anything a systemd unit:
   `.env`. No telemetry vendors, no analytics.
 - **It will not run without a GPU driver — it just measures less.** No NVML
   means no energy numbers; scheduling still works on duration alone.
+- **It will not leave your GPU capped after a benchmark.** The suite lowers the
+  board power limit while it measures, then restores the card's **factory
+  default** — not whatever the limit happened to be when it started, which
+  would silently re-apply a cap left behind by an earlier interrupted run. A
+  cap only throttles and never damages, but a card left quietly throttled is
+  its own kind of harm. (The separate `APPLY_POWER_CAP` path for scheduled
+  jobs restores the limit it found instead — see
+  [Hardware safety](HARDWARE-SAFETY.md) for exactly which call restores what.)
 
 ---
 
@@ -60,9 +75,9 @@ Requires **Python 3.12+** and Linux.
 ```bash
 git clone https://github.com/boringbots/async-energy-controller.git
 cd async-energy-controller
-python -m venv.venv && source.venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 
-pip install -e.   # installs and runs fine with no GPU driver — energy stays null
+pip install -e .   # installs and runs fine with no GPU driver — energy stays null
 ```
 
 This puts `async-energy-controller` on your PATH (and `hm-async-controller` as a

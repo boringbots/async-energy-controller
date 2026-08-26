@@ -147,6 +147,27 @@ class PowerCapManager:
 
         self._prior_limit_w = prior
         logger.info("power cap: applied %.0fW (previous limit %.0fW)", cap_w, prior)
+
+        # A limit BELOW the card's factory default means it was already capped
+        # before this job started. Two causes look identical from here: the
+        # operator set it deliberately, or an earlier job was killed (reboot,
+        # OOM, SIGKILL) before its `finally` could restore. Because `restore()`
+        # puts back what it FOUND, the second case is self-perpetuating -- the
+        # card never returns to factory and nothing says so. Warn rather than
+        # override: silently undoing a deliberate cap would be its own
+        # surprise, and the operator is the only one who can tell the cases
+        # apart. See HARDWARE-SAFETY.md, "Known limitation".
+        default_w = self._profiler.get_power_limit_default_w()
+        if default_w is not None and prior < default_w:
+            logger.warning(
+                "power cap: this GPU was ALREADY capped at %.0fW before the job started "
+                "(card's factory default is %.0fW). If you did not set that yourself it was "
+                "probably left behind by a job that was killed before it could restore, and "
+                "every run since has been throttled. Restore with: nvidia-smi -pl %.0f",
+                prior,
+                default_w,
+                default_w,
+            )
         return STATUS_APPLIED
 
     def restore(self) -> str:

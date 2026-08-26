@@ -33,9 +33,13 @@ class FakeNvml:
 
     NVMLError_NoPermission = type("NVMLError_NoPermission", (_NvmlError,), {})
 
-    def __init__(self, *, limit_mw=300_000, deny=False):
+    def __init__(self, *, limit_mw=300_000, deny=False, default_mw=None):
         self.limit_mw = limit_mw
         self.deny = deny
+        # The card's FACTORY DEFAULT. `None` models a driver that cannot
+        # report one, where `_try` swallows the call and the already-capped
+        # check is skipped rather than guessed at.
+        self.default_mw = default_mw
         self.set_calls: list[int] = []
 
     def nvmlInit(self):
@@ -49,6 +53,11 @@ class FakeNvml:
 
     def nvmlDeviceGetPowerManagementLimit(self, h):
         return self.limit_mw
+
+    def nvmlDeviceGetPowerManagementDefaultLimit(self, h):
+        if self.default_mw is None:
+            raise _NvmlError("default limit unavailable on this driver")
+        return self.default_mw
 
     def nvmlDeviceSetPowerManagementLimit(self, h, limit_mw):
         if self.deny:
@@ -206,3 +215,58 @@ def test_recommendation_refetches_after_the_ttl_elapses():
     mgr.restore()
     mgr.apply()
     assert client.calls == 2  # ttl elapsed between the two fetches
+
+
+# --- "this card was already capped" warning ---------------------------------
+# `restore()` puts back the limit `apply()` FOUND, so a job killed outright
+# between the two (reboot, OOM-kill, SIGKILL) leaves the cap in place and the
+# next job then restores that cap. Nothing self-heals and nothing says so.
+# apply() cannot safely undo it -- an operator's deliberate cap looks
+# identical -- so it warns instead. See HARDWARE-SAFETY.md "Known limitation".
+
+
+def test_warns_when_the_card_was_already_capped_below_factory_default(caplog):
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=200_000, default_mw=350_000))
+    mgr = PowerCapManager(client=FakeClient(cap_w=250.0), profiler=profiler, node_hash="n1")
+
+    with caplog.at_level("WARNING"):
+        assert mgr.apply() == STATUS_APPLIED
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("ALREADY capped" in w for w in warnings), warnings
+    joined = " ".join(warnings)
+    assert "200W" in joined and "350W" in joined, joined
+    assert "nvidia-smi -pl 350" in joined, joined
+
+
+def test_no_warning_when_the_card_is_at_its_factory_default(caplog):
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=350_000, default_mw=350_000))
+    mgr = PowerCapManager(client=FakeClient(cap_w=250.0), profiler=profiler, node_hash="n1")
+
+    with caplog.at_level("WARNING"):
+        assert mgr.apply() == STATUS_APPLIED
+
+    assert not [r for r in caplog.records if "ALREADY capped" in r.getMessage()]
+
+
+def test_no_warning_when_the_driver_cannot_report_a_default(caplog):
+    """Rule 3: an unreadable default is not evidence of anything, so the
+    check is skipped rather than guessed at."""
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=200_000, default_mw=None))
+    mgr = PowerCapManager(client=FakeClient(cap_w=250.0), profiler=profiler, node_hash="n1")
+
+    with caplog.at_level("WARNING"):
+        assert mgr.apply() == STATUS_APPLIED
+
+    assert not [r for r in caplog.records if "ALREADY capped" in r.getMessage()]
+
+
+def test_restore_still_returns_the_limit_it_found(caplog):
+    """The warning must not change behaviour: overriding an operator's
+    deliberate cap would be its own surprise."""
+    profiler = NVMLProfiler(nvml=FakeNvml(limit_mw=200_000, default_mw=350_000))
+    mgr = PowerCapManager(client=FakeClient(cap_w=250.0), profiler=profiler, node_hash="n1")
+
+    assert mgr.apply() == STATUS_APPLIED
+    assert mgr.restore() == STATUS_RESTORED
+    assert profiler._nvml.limit_mw == 200_000

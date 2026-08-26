@@ -32,7 +32,7 @@ are all mocked — keep it that way so the suite runs anywhere.
 ```bash
 git clone https://github.com/boringbots/async-energy-controller.git
 cd async-energy-controller
-python -m venv.venv && source.venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 
 python -m pytest tests/                    # full suite

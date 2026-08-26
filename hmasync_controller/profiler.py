@@ -529,6 +529,22 @@ class NVMLProfiler(_SampledProfiler):
         mw = _try(lambda: self._nvml.nvmlDeviceGetPowerManagementLimit(self._handle))
         return mw / 1000.0 if mw is not None else None
 
+    def get_power_limit_default_w(self) -> float | None:
+        """The card's FACTORY DEFAULT power limit in watts, or None if
+        unreadable.
+
+        Distinct from `get_power_limit_w`, which reports whatever the card is
+        set to right now. powercap.py compares the two before applying a cap:
+        a current limit BELOW the factory default means the card was already
+        capped, which is either something the operator did deliberately or a
+        cap left behind by a job that was killed before it could restore. The
+        two cases look identical from here, so this is used to WARN rather
+        than to silently override -- see `PowerCapManager.apply`.
+        """
+        self._ensure_nvml()
+        mw = _try(lambda: self._nvml.nvmlDeviceGetPowerManagementDefaultLimit(self._handle))
+        return mw / 1000.0 if mw is not None else None
+
     def set_power_limit_w(self, watts: float) -> None:
         """Set the power-management limit in watts.
 
