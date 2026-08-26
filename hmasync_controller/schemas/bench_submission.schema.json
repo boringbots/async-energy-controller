@@ -5,206 +5,755 @@
   "description": "The submission contract for `eb export --bundle` (US-ENG-15, TEST-MATRIX.md section 9): hardware-CLASS fingerprint, engine versions, and per-run benchmark metrics only -- never prompts, commands, workflow data, or raw telemetry. `schema_version` here is the BUNDLE format's own version, independent of the local RunMetrics `schema_version` carried inside each run entry. This file is authoritative in the energy-bench repo; the hm-async api reads it directly (same repo), the controller repo vendors a checksum copy. v2 (US-PROP-01) adds four per-run confidence-interval fields (jpc_ci_low/jpc_ci_high/accuracy_ci_low/accuracy_ci_high), total_joules_cpu_dram, and a top-level baselines array (idle-draw measurements, enabling server-side net-of-idle) -- every v2 addition is OPTIONAL here so a v1 bundle (schema_version \"1\", missing all of the above) still validates unchanged. Privacy review: every v2 field is an aggregate figure already computed at export time -- no prompts, no per-item data, and no new identifying information (baselines carry node_hash, never the raw host, exactly like every other array in this bundle). US-MERGE-05 adds an OPTIONAL top-level `suite` field (\"quick\" | \"calibrate\") marking which probe produced the bundle -- the async-energy-controller's slimmed `bench calibrate` sets \"calibrate\" so a server-side reader never pools it with leaderboard-grade `bench quick`/`eb quick` results; a bundle with no `suite` field (every bundle written before this addition) still validates unchanged and is treated as \"quick\" by convention.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "generated_at", "nodes", "runs", "grades", "load_profiles"],
+  "required": [
+    "schema_version",
+    "generated_at",
+    "nodes",
+    "runs",
+    "grades",
+    "load_profiles"
+  ],
   "properties": {
-    "schema_version": { "enum": ["1", "2"] },
-    "generated_at": { "type": "string", "format": "date-time" },
-    "suite": { "enum": ["quick", "calibrate"] },
+    "schema_version": {
+      "enum": [
+        "1",
+        "2"
+      ]
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "suite": {
+      "enum": [
+        "quick",
+        "calibrate"
+      ]
+    },
     "nodes": {
       "type": "array",
-      "items": { "$ref": "#/$defs/node" }
+      "items": {
+        "$ref": "#/$defs/node"
+      }
     },
     "runs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/run" }
+      "items": {
+        "$ref": "#/$defs/run"
+      }
     },
     "grades": {
       "type": "array",
-      "items": { "$ref": "#/$defs/grade" }
+      "items": {
+        "$ref": "#/$defs/grade"
+      }
     },
     "load_profiles": {
       "type": "array",
-      "items": { "$ref": "#/$defs/load_profile" }
+      "items": {
+        "$ref": "#/$defs/load_profile"
+      }
     },
     "baselines": {
       "type": "array",
-      "items": { "$ref": "#/$defs/baseline" }
+      "items": {
+        "$ref": "#/$defs/baseline"
+      }
     }
   },
   "$defs": {
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["node_hash"],
+      "required": [
+        "node_hash"
+      ],
       "properties": {
-        "node_hash": { "type": "string" },
-        "cpu_model": { "type": ["string", "null"] },
-        "mem_total_mib": { "type": ["number", "null"] },
-        "ram_gb": { "type": ["integer", "null"] },
-        "pcie_gen": { "type": ["string", "null"] }
+        "node_hash": {
+          "type": "string"
+        },
+        "cpu_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mem_total_mib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ram_gb": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pcie_gen": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "run": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "node_hash", "schema_version", "engine", "model", "measurement_tier",
-        "run_duration_s", "repeat_index", "created_at"
+        "node_hash",
+        "schema_version",
+        "engine",
+        "model",
+        "measurement_tier",
+        "run_duration_s",
+        "repeat_index",
+        "created_at"
       ],
       "properties": {
-        "node_hash": { "type": ["string", "null"] },
-        "created_at": { "type": ["string", "null"] },
-        "repeat_index": { "type": "integer" },
-
-        "schema_version": { "type": "string" },
-        "engine": { "type": "string" },
-        "engine_version": { "type": ["string", "null"] },
-        "driver_version": { "type": ["string", "null"] },
-        "cuda_version": { "type": ["string", "null"] },
-        "gpu_name": { "type": ["string", "null"] },
-        "has_vision_tower": { "type": "boolean" },
-        "power_limit_w": { "type": ["integer", "null"] },
-        "clock_lock_mhz": { "type": ["integer", "null"] },
-
-        "temperature": { "type": "number" },
-        "max_tokens": { "type": "integer" },
-        "seed": { "type": "integer" },
-        "n_shot": { "type": ["integer", "null"] },
-        "thinking_mode": { "type": ["string", "null"] },
-        "dataset_revision": { "type": ["string", "null"] },
-
-        "model": { "type": "string" },
-        "quantization": { "type": ["string", "null"] },
-
-        "task": { "type": ["string", "null"] },
-        "task_shape": { "type": ["string", "null"] },
-        "is_canary": { "type": "boolean" },
-        "n_items": { "type": "integer" },
-        "n_correct": { "type": "integer" },
-        "accuracy": { "type": ["number", "null"] },
-
-        "joules_per_token": { "type": "number" },
-        "joules_per_item": { "type": ["number", "null"] },
-        "joules_per_correct_answer": { "type": ["number", "null"] },
-        "efficiency_index": { "type": ["number", "null"] },
-        "jpc_ci_low": { "type": ["number", "null"] },
-        "jpc_ci_high": { "type": ["number", "null"] },
-        "accuracy_ci_low": { "type": ["number", "null"] },
-        "accuracy_ci_high": { "type": ["number", "null"] },
-
-        "total_joules_gpu": { "type": "number" },
-        "total_joules_gpu_counter": { "type": ["number", "null"] },
-        "total_joules_gpu_best": { "type": ["number", "null"] },
-        "energy_source": { "type": "string" },
-        "counter_vs_integration_pct_diff": { "type": ["number", "null"] },
-        "total_joules_cpu": { "type": ["number", "null"] },
-        "total_joules_cpu_dram": { "type": ["number", "null"] },
-        "kwh_delta": { "type": ["number", "null"] },
-        "wall_counter_ticks": { "type": ["integer", "null"] },
-
-        "mean_tokens_per_second": { "type": "number" },
-        "pooled_tokens_per_second": { "type": "number" },
-        "total_completion_tokens": { "type": "integer" },
-        "streaming_used": { "type": "boolean" },
-        "ttft_p50_s": { "type": ["number", "null"] },
-        "ttft_p95_s": { "type": ["number", "null"] },
-        "itl_mean_ms": { "type": ["number", "null"] },
-        "itl_p95_ms": { "type": ["number", "null"] },
-
-        "run_duration_s": { "type": "number" },
-
-        "peak_gpu_w": { "type": "number" },
-        "mean_gpu_w": { "type": "number" },
-        "gpu_temp_c_start": { "type": ["number", "null"] },
-        "gpu_temp_c_end": { "type": ["number", "null"] },
-        "peak_gpu_temp_c": { "type": ["number", "null"] },
-        "mean_gpu_temp_c": { "type": ["number", "null"] },
-
-        "peak_gpu_mem_used_mib": { "type": ["number", "null"] },
-        "mean_gpu_mem_used_mib": { "type": ["number", "null"] },
-        "gpu_mem_used_pct_of_total": { "type": ["number", "null"] },
-
-        "mean_gpu_util_pct": { "type": ["number", "null"] },
-        "mean_gpu_mem_util_pct": { "type": ["number", "null"] },
-        "mean_gpu_sm_clock_mhz": { "type": ["number", "null"] },
-        "mean_gpu_fan_pct": { "type": ["number", "null"] },
-
-        "thermal_throttle_pct": { "type": ["number", "null"] },
-        "power_cap_throttle_pct": { "type": ["number", "null"] },
-
-        "mean_wall_w": { "type": ["number", "null"] },
-        "peak_wall_w": { "type": ["number", "null"] },
-        "node_overhead_ratio": { "type": ["number", "null"] },
-        "measurement_tier": { "enum": ["A", "B", "C"] },
-
-        "alpha_j_per_prompt_token": { "type": ["number", "null"] },
-        "beta_j_per_completion_token": { "type": ["number", "null"] },
-        "e_fixed_j": { "type": ["number", "null"] },
-        "costmodel_r2": { "type": ["number", "null"] },
-        "costmodel_n": { "type": ["integer", "null"] },
-
-        "gpu_power_std_w": { "type": ["number", "null"] },
-        "gpu_power_cv": { "type": ["number", "null"] },
-        "gpu_power_crest_factor": { "type": ["number", "null"] },
-        "gpu_power_p95_p50_ratio": { "type": ["number", "null"] },
-        "gpu_power_jaggedness_w_per_s": { "type": ["number", "null"] }
+        "node_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repeat_index": {
+          "type": "integer"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "engine": {
+          "type": "string"
+        },
+        "engine_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "driver_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cuda_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gpu_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_vision_tower": {
+          "type": "boolean"
+        },
+        "power_limit_w": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpu_stock_power_limit_w": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clock_lock_mhz": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "n_shot": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "thinking_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dataset_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "quantization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_shape": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_canary": {
+          "type": "boolean"
+        },
+        "n_items": {
+          "type": "integer"
+        },
+        "n_correct": {
+          "type": "integer"
+        },
+        "accuracy": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "joules_per_token": {
+          "type": "number"
+        },
+        "joules_per_item": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "joules_per_correct_answer": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "efficiency_index": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "jpc_ci_low": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "jpc_ci_high": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "accuracy_ci_low": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "accuracy_ci_high": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_joules_gpu": {
+          "type": "number"
+        },
+        "total_joules_gpu_counter": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_joules_gpu_best": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "energy_source": {
+          "type": "string"
+        },
+        "counter_vs_integration_pct_diff": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_joules_cpu": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_joules_cpu_dram": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "kwh_delta": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "wall_counter_ticks": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mean_tokens_per_second": {
+          "type": "number"
+        },
+        "pooled_tokens_per_second": {
+          "type": "number"
+        },
+        "total_completion_tokens": {
+          "type": "integer"
+        },
+        "streaming_used": {
+          "type": "boolean"
+        },
+        "ttft_p50_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ttft_p95_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "itl_mean_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "itl_p95_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "run_duration_s": {
+          "type": "number"
+        },
+        "peak_gpu_w": {
+          "type": "number"
+        },
+        "mean_gpu_w": {
+          "type": "number"
+        },
+        "gpu_temp_c_start": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_temp_c_end": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "peak_gpu_temp_c": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_temp_c": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "peak_gpu_mem_used_mib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_mem_used_mib": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_mem_used_pct_of_total": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_util_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_mem_util_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_sm_clock_mhz": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_gpu_fan_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "thermal_throttle_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "power_cap_throttle_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mean_wall_w": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "peak_wall_w": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "node_overhead_ratio": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "measurement_tier": {
+          "enum": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        "alpha_j_per_prompt_token": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "beta_j_per_completion_token": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "e_fixed_j": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "costmodel_r2": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "costmodel_n": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpu_power_std_w": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_power_cv": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_power_crest_factor": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_power_p95_p50_ratio": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gpu_power_jaggedness_w_per_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
       }
     },
     "grade": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["config_key", "model", "engine", "n_runs"],
+      "required": [
+        "config_key",
+        "model",
+        "engine",
+        "n_runs"
+      ],
       "properties": {
-        "config_key": { "type": "string" },
-        "node_hash": { "type": ["string", "null"] },
-        "model": { "type": "string" },
-        "quantization": { "type": ["string", "null"] },
-        "engine": { "type": "string" },
-        "power_limit_w": { "type": ["integer", "null"] },
-        "gpu_name": { "type": ["string", "null"] },
-        "schema_version": { "type": ["string", "null"] },
-        "capability_pct": { "type": ["number", "null"] },
-        "capability_stars": { "type": ["integer", "null"] },
-        "efficiency_stars": { "type": ["integer", "null"] },
-        "speed_stars": { "type": ["integer", "null"] },
-        "smoothness_stars": { "type": ["integer", "null"] },
-        "flexibility_stars": { "type": ["integer", "null"] },
-        "footprint_stars": { "type": ["integer", "null"] },
-        "letter_grade": { "type": ["string", "null"] },
-        "n_runs": { "type": "integer" }
+        "config_key": {
+          "type": "string"
+        },
+        "node_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "quantization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "type": "string"
+        },
+        "power_limit_w": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpu_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capability_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "capability_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "efficiency_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "speed_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "smoothness_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "flexibility_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "footprint_stars": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "letter_grade": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "n_runs": {
+          "type": "integer"
+        }
       }
     },
     "load_profile": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "engine", "load_time_s", "vram_after_load_mib", "loaded_idle_mean_w"],
+      "required": [
+        "model",
+        "engine",
+        "load_time_s",
+        "vram_after_load_mib",
+        "loaded_idle_mean_w"
+      ],
       "properties": {
-        "node_hash": { "type": ["string", "null"] },
-        "model": { "type": "string" },
-        "quantization": { "type": ["string", "null"] },
-        "engine": { "type": "string" },
-        "engine_version": { "type": ["string", "null"] },
-        "load_time_s": { "type": "number" },
-        "load_energy_j": { "type": ["number", "null"] },
-        "vram_after_load_mib": { "type": "number" },
-        "loaded_idle_mean_w": { "type": "number" },
-        "driver_version": { "type": ["string", "null"] },
-        "created_at": { "type": ["string", "null"] }
+        "node_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "quantization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "type": "string"
+        },
+        "engine_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "load_time_s": {
+          "type": "number"
+        },
+        "load_energy_j": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "vram_after_load_mib": {
+          "type": "number"
+        },
+        "loaded_idle_mean_w": {
+          "type": "number"
+        },
+        "driver_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "baseline": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["node_hash", "kind"],
+      "required": [
+        "node_hash",
+        "kind"
+      ],
       "properties": {
-        "node_hash": { "type": ["string", "null"] },
-        "kind": { "enum": ["empty", "loaded"] },
-        "model": { "type": ["string", "null"] },
-        "mean_gpu_w": { "type": "number" },
-        "peak_gpu_w": { "type": "number" },
-        "gpu_mem_used_mib": { "type": "number" },
-        "duration_s": { "type": "number" },
-        "driver_version": { "type": ["string", "null"] }
+        "node_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "empty",
+            "loaded"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mean_gpu_w": {
+          "type": "number"
+        },
+        "peak_gpu_w": {
+          "type": "number"
+        },
+        "gpu_mem_used_mib": {
+          "type": "number"
+        },
+        "duration_s": {
+          "type": "number"
+        },
+        "driver_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }
