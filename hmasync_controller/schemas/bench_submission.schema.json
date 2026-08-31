@@ -182,7 +182,7 @@
           "type": "number"
         },
         "max_tokens": {
-          "type": "integer"
+          "type": ["integer", "null"]
         },
         "seed": {
           "type": "integer"
