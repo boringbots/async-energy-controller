@@ -331,7 +331,7 @@ class VLLMClient:
         self,
         prompt: str,
         model: str,
-        max_tokens: int = 512,
+        max_tokens: int | None = 512,
         stop: list[str] | None = None,
         chat_template_kwargs: dict | None = None,
         temperature: float = 0.0,
@@ -376,7 +376,9 @@ class VLLMClient:
         payload: dict[str, object] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
+            # Omitted entirely when None -- see the arg docstring. Sending
+            # `null` is NOT equivalent for every OpenAI-compatible server.
+            **({} if max_tokens is None else {"max_tokens": max_tokens}),
             "temperature": temperature,
         }
         if stop:
@@ -474,7 +476,7 @@ class VLLMClient:
         self,
         prompt: str,
         model: str,
-        max_tokens: int = 512,
+        max_tokens: int | None = 512,
         temperature: float = 0.0,
         stream: bool = False,
     ) -> InferenceResult:
@@ -483,7 +485,14 @@ class VLLMClient:
         Args:
             prompt: The input prompt text.
             model: Model name to use for inference.
-            max_tokens: Maximum tokens to generate (default 512).
+            max_tokens: Maximum tokens to generate (default 512). None OMITS
+                the field entirely, which is not the same as a large value:
+                every engine's own default is to run to EOS or the context
+                window (vLLM resolves an unset cap to
+                `max_model_len - prompt_tokens`; llama.cpp's --n-predict
+                default is -1, "infinity"), and vLLM REJECTS a request whose
+                prompt + max_tokens exceeds the context rather than clamping
+                it -- so "uncapped" cannot be faked with a big number.
             temperature: Sampling temperature. Default 0.0 (deterministic)
                 matches the value this was hardcoded to before it became a
                 parameter.
@@ -508,7 +517,9 @@ class VLLMClient:
         payload = {
             "model": model,
             "prompt": prompt,
-            "max_tokens": max_tokens,
+            # Omitted entirely when None -- see the arg docstring. Sending
+            # `null` is NOT equivalent for every OpenAI-compatible server.
+            **({} if max_tokens is None else {"max_tokens": max_tokens}),
             "temperature": temperature,
         }
 
