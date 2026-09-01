@@ -68,6 +68,21 @@ def _delta_reasoning(choice: dict) -> str | None:
     return None
 
 
+def _message_reasoning(message: dict) -> str:
+    """The reasoning channel of a non-streamed message, on its own.
+
+    `_message_text` folds the two channels down to the one the scorer should
+    read. This keeps the other one, so a run that scored badly can be
+    diagnosed as a wrong answer or a missed extraction rather than argued
+    about. Returns "" when the model emitted no reasoning channel.
+    """
+    for key in ("reasoning", "reasoning_content"):
+        text = (message.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _message_text(message: dict) -> str:
     """The assistant's answer text, tolerating reasoning models that split
     their output across channels.
@@ -204,7 +219,7 @@ class VLLMClient:
         url: str,
         payload: dict[str, object],
         extract_text: Callable[[dict], str | None],
-    ) -> tuple[str, str | None, int, int, float | None, list[float]]:
+    ) -> tuple[str, str, str | None, int, int, float | None, list[float]]:
         """POST a `stream: true` request and parse the SSE response body.
 
         `extract_text(choice)` pulls the token text out of one `choices[0]`
@@ -216,10 +231,13 @@ class VLLMClient:
         chunk carries `usage`, same token counts the non-streaming path gets
         for free from the top-level response body.
 
-        Returns (text, finish_reason, prompt_tokens, completion_tokens,
-        ttft_s, itl_gaps_ms). `ttft_s` is None if no content token ever
-        arrived (e.g. max_tokens=0) -- the caller substitutes 0.0 to match
-        the non-streaming path's placeholder value.
+        Returns (text, reasoning, finish_reason, prompt_tokens,
+        completion_tokens, ttft_s, itl_gaps_ms). `text` is what a scorer
+        should read; `reasoning` is the separate chain-of-thought channel,
+        returned raw so a caller can keep it, and "" when the model emitted
+        none. `ttft_s` is None if no content token ever arrived (e.g.
+        max_tokens=0) -- the caller substitutes 0.0 to match the
+        non-streaming path's placeholder value.
 
         Raises:
             VLLMTimeoutError: On a request timeout.
@@ -314,12 +332,14 @@ class VLLMClient:
         # is used only when it did not. Keeping the two paths identical matters
         # -- otherwise the same run scores differently depending on whether
         # streaming was used, which is a config detail, not a measurement.
+        reasoning = "".join(fallback_parts).strip()
         text = "".join(text_parts).strip()
         if not text:
-            text = "".join(fallback_parts).strip()
+            text = reasoning
 
         return (
             text,
+            reasoning,
             finish_reason,
             prompt_tokens,
             completion_tokens,
@@ -389,6 +409,7 @@ class VLLMClient:
         if stream:
             (
                 text,
+                reasoning,
                 finish_reason,
                 prompt_tokens,
                 completion_tokens,
@@ -414,6 +435,8 @@ class VLLMClient:
                     t_end_s=t_end_s,
                     finish_reason=finish_reason,
                     itl_gaps_ms=itl_gaps_ms,
+                    completion_text=text,
+                    reasoning_text=reasoning if reasoning and reasoning != text else None,
                 ),
                 text,
             )
@@ -440,7 +463,9 @@ class VLLMClient:
                 completion_tokens = usage.get("completion_tokens", 0)
 
                 choices = data.get("choices", [])
-                text = _message_text(choices[0].get("message", {})) if choices else ""
+                message = choices[0].get("message", {}) if choices else {}
+                text = _message_text(message) if choices else ""
+                reasoning = _message_reasoning(message) if choices else ""
                 finish_reason = choices[0].get("finish_reason") if choices else None
                 t_end_s = time.time()
 
@@ -459,6 +484,10 @@ class VLLMClient:
                         t_start_s=t_start_s,
                         t_end_s=t_end_s,
                         finish_reason=finish_reason,
+                        completion_text=text or "",
+                        reasoning_text=(
+                            reasoning if reasoning and reasoning != text else None
+                        ),
                     ),
                     text or "",
                 )
@@ -525,7 +554,8 @@ class VLLMClient:
 
         if stream:
             (
-                _text,
+                text,
+                _reasoning,
                 finish_reason,
                 prompt_tokens,
                 completion_tokens,
@@ -550,6 +580,7 @@ class VLLMClient:
                 t_end_s=t_end_s,
                 finish_reason=finish_reason,
                 itl_gaps_ms=itl_gaps_ms,
+                completion_text=text,
             )
 
         try:
@@ -575,6 +606,7 @@ class VLLMClient:
 
                 choices = data.get("choices", [])
                 finish_reason = choices[0].get("finish_reason") if choices else None
+                text = (choices[0].get("text") or "") if choices else ""
                 t_end_s = time.time()
 
                 # TTFT is deferred (not available without streaming)
@@ -594,6 +626,7 @@ class VLLMClient:
                     t_start_s=t_start_s,
                     t_end_s=t_end_s,
                     finish_reason=finish_reason,
+                    completion_text=text,
                 )
 
         except httpx.TimeoutException as e:

@@ -85,3 +85,138 @@ class TestStreamingReasoningChannel:
 
     def test_content_chunks_are_not_mistaken_for_reasoning(self):
         assert _delta_reasoning({"delta": {"content": "not reasoning"}}) is None
+
+
+class TestCompletionTextIsKept:
+    """A run's own answers, stored beside its energy numbers.
+
+    Written after two results could not be explained from the stored columns
+    alone. Qwen3.5-9B on math500 scored 0.80 with thinking off and 0.12 with
+    it on, at 12% truncation -- and no column separated "the model reasoned
+    its way to a wrong answer" from "it answered correctly in a format the
+    extractor does not read". The same ambiguity had already come up on
+    mmlu_redux (0.84 -> 0.48). Both are answerable the moment the text is on
+    disk, and neither is answerable without it.
+    """
+
+    def test_streaming_keeps_content_and_reasoning_apart(self):
+        """`completion_text` is what the scorer read; `reasoning_text` is the
+        scratchpad it did NOT read. Kept as two fields because the whole
+        point is to tell a wrong answer from a missed extraction."""
+        result, text = _run_chat(
+            content_chunks=["The answer ", "is B"],
+            reasoning_chunks=["A looks right ", "but is not"],
+        )
+        assert text == "The answer is B"
+        assert result.completion_text == "The answer is B"
+        assert result.reasoning_text == "A looks right but is not"
+
+    def test_reasoning_is_not_stored_twice(self):
+        """When content is empty the reasoning channel IS the scored text
+        (`_message_text`'s fallback). Storing it in both fields would double
+        a thinking run's largest column -- 7,411 tokens/item measured on
+        gpqa_diamond -- to say the same thing twice."""
+        result, text = _run_chat(
+            content_chunks=[], reasoning_chunks=["so the answer is C"]
+        )
+        assert text == "so the answer is C"
+        assert result.completion_text == "so the answer is C"
+        assert result.reasoning_text is None
+
+    def test_ordinary_model_has_no_reasoning_text(self):
+        result, _ = _run_chat(content_chunks=["B"], reasoning_chunks=[])
+        assert result.completion_text == "B"
+        assert result.reasoning_text is None
+
+    def test_non_streaming_path_keeps_the_same_two_fields(self):
+        """The two paths must agree: which one a run takes is a config
+        detail, not a measurement, and the same run must be diagnosable
+        either way."""
+        result, text = _run_chat(
+            content_chunks=["The answer is B"],
+            reasoning_chunks=["A looks right but is not"],
+            stream=False,
+        )
+        assert text == "The answer is B"
+        assert result.completion_text == "The answer is B"
+        assert result.reasoning_text == "A looks right but is not"
+
+
+# --- a fake OpenAI-compatible server, streaming and not -----------------------
+
+
+def _run_chat(*, content_chunks, reasoning_chunks, stream=True):
+    """Drive `VLLMClient.chat()` against a throwaway local HTTP server that
+    answers with the given channels. A real socket rather than a monkeypatched
+    httpx, so the SSE framing is exercised too."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from hmasync_controller.bench.vllm_client import VLLMClient
+
+    content = "".join(content_chunks)
+    reasoning = "".join(reasoning_chunks)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # silence the stderr access log
+            pass
+
+        def do_POST(self):  # noqa: N802 - stdlib handler naming
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if stream:
+                chunks = [
+                    {"choices": [{"delta": {"content": p}, "finish_reason": None}]}
+                    for p in content_chunks
+                ]
+                chunks += [
+                    {"choices": [{"delta": {"reasoning": p}, "finish_reason": None}]}
+                    for p in reasoning_chunks
+                ]
+                chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+                chunks.append(
+                    {
+                        "choices": [],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 9},
+                    }
+                )
+                body = "".join(
+                    f"data: {json.dumps(c)}\n\n" for c in chunks
+                ) + "data: [DONE]\n\n"
+                ctype = "text/event-stream"
+            else:
+                body = json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": content,
+                                    "reasoning": reasoning,
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 9},
+                    }
+                )
+                ctype = "application/json"
+            payload = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = VLLMClient("127.0.0.1", server.server_address[1])
+        return asyncio.run(
+            client.chat(prompt="q", model="m", max_tokens=16, stream=stream)
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

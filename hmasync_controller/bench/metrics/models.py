@@ -78,6 +78,22 @@ class InferenceResult:
     t_end_s: float | None = None
     finish_reason: str | None = None
     itl_gaps_ms: list[float] = field(default_factory=list)
+    completion_text: str | None = None
+    """The text the scorer was handed, verbatim -- `content` when the model
+    produced any, otherwise the reasoning channel, exactly as `_message_text`
+    resolves it. Kept because twice now a result has been unexplainable
+    without it: a Qwen3.5-9B math500 run scored 0.12 with thinking on against
+    0.80 with it off, at only 12% truncation, and nothing in the stored
+    columns could separate "the model got it wrong" from "the extractor
+    missed a correctly-stated answer". None when the caller did not ask for
+    completions to be kept."""
+
+    reasoning_text: str | None = None
+    """The reasoning channel on its own, when the model emitted BOTH channels
+    and `completion_text` therefore holds `content`. None when there was no
+    reasoning channel, or when it already IS `completion_text` (an empty
+    `content`) -- storing it twice would double a run's largest column for
+    nothing."""
 
 
 @dataclass
