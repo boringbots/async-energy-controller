@@ -79,7 +79,18 @@ class InferenceResult:
     finish_reason: str | None = None
     itl_gaps_ms: list[float] = field(default_factory=list)
     completion_text: str | None = None
-    """The text the scorer was handed, verbatim -- `content` when the model
+    """LOCAL ONLY -- never written by this package, never submitted.
+
+    `tests/test_bench_no_completion_text_escapes.py` enforces both boundaries:
+    the controller's own `items.parquet` writer has no text column, and the
+    submission bundle schema has no content field. The lab
+    (`energy_bench.storage.artifact`) stores it deliberately, on the
+    operator's own disk, gated by `probe.store_completions`. If you ever need
+    this in a bundle or a log, that is a privacy decision to make explicitly,
+    not a serialization to widen -- a dataclass field rides along inside any
+    `asdict()`, which is exactly why those tests exist.
+
+    The text the scorer was handed, verbatim -- `content` when the model
     produced any, otherwise the reasoning channel, exactly as `_message_text`
     resolves it. Kept because twice now a result has been unexplainable
     without it: a Qwen3.5-9B math500 run scored 0.12 with thinking on against
