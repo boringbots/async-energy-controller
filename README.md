@@ -380,8 +380,11 @@ Points worth knowing:
   forever.
 - **Reporting is best effort.** A failed telemetry push logs a warning; it never
   turns a job that succeeded into one that failed.
-- **An exception inside `measure()` is recorded as a failed run and re-raised.**
-  Your error handling is not swallowed to make a report tidy.
+- **An exception inside `measure()` is re-raised, never swallowed** to make a
+  report tidy. The run is reported with a failed status — but note a known
+  mismatch: the SDK currently sends `exit_status: "failed"` while the API
+  accepts only `success` / `error` / `preempted`, so that record is rejected
+  server-side until the SDK sends `error`. Successful blocks report normally.
 - **Use an API key, not your password.** Mint one in the dashboard. It is scoped
   to this caller and revocable without changing your account password.
 
