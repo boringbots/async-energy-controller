@@ -220,3 +220,81 @@ def _run_chat(*, content_chunks, reasoning_chunks, stream=True):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class TestReasoningEffortReachesHarmony:
+    """`reasoning_effort` must be sent where the harmony renderer looks.
+
+    vLLM builds a gpt-oss prompt with the harmony encoder, whose system
+    message takes the effort from the TOP-LEVEL `reasoning_effort` request
+    field; `chat_template_kwargs` is read only by the Jinja template path.
+    Sending the dial inside the kwargs dict alone left every "low" and "high"
+    row of the 2026-09-09 effort ladder running at the default `medium` --
+    142 of 198 gpqa reasoning traces byte-identical between the two rungs
+    (energy-bench BENCHMARK-REFERENCE.md F13 / D12).
+    """
+
+    def _payload_for(self, chat_template_kwargs):
+        import asyncio
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from hmasync_controller.bench.vllm_client import VLLMClient
+
+        seen: dict = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):  # noqa: N802 - stdlib handler naming
+                raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                seen.update(json.loads(raw))
+                body = json.dumps(
+                    {
+                        "choices": [{"message": {"content": "B"}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 1},
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            client = VLLMClient("127.0.0.1", server.server_address[1])
+            asyncio.run(
+                client.chat(
+                    prompt="q",
+                    model="m",
+                    max_tokens=16,
+                    stream=False,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        return seen
+
+    def test_effort_is_lifted_to_the_top_level(self):
+        payload = self._payload_for({"reasoning_effort": "low"})
+        assert payload["reasoning_effort"] == "low"
+        # The kwargs copy stays: a Jinja template that reads it there still can.
+        assert payload["chat_template_kwargs"] == {"reasoning_effort": "low"}
+
+    def test_thinking_pin_is_not_lifted(self):
+        """`enable_thinking` has no top-level twin; lifting it would invent
+        a request field vLLM does not define."""
+        payload = self._payload_for({"enable_thinking": False})
+        assert "reasoning_effort" not in payload
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_no_kwargs_sends_neither(self):
+        payload = self._payload_for(None)
+        assert "reasoning_effort" not in payload
+        assert "chat_template_kwargs" not in payload

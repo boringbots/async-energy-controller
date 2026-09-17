@@ -368,7 +368,9 @@ class VLLMClient:
             chat_template_kwargs: Passed through as the top-level
                 `chat_template_kwargs` (e.g. `{"enable_thinking": False}`) only
                 when set, so an unset value is byte-identical to the payload
-                before this parameter existed.
+                before this parameter existed. A `reasoning_effort` key is
+                ALSO sent as the top-level `reasoning_effort` field, the only
+                place vLLM's harmony renderer (gpt-oss) reads it.
             temperature: Sampling temperature. Default 0.0 (deterministic)
                 matches the value this was hardcoded to before it became a
                 parameter.
@@ -405,6 +407,19 @@ class VLLMClient:
             payload["stop"] = stop
         if chat_template_kwargs:
             payload["chat_template_kwargs"] = chat_template_kwargs
+            # Harmony models (gpt-oss) never see `chat_template_kwargs`: vLLM
+            # renders their system message with the harmony encoder, which
+            # reads the effort from the TOP-LEVEL `reasoning_effort` request
+            # field and ignores the Jinja-only kwargs dict. Found 2026-09-09
+            # after eight "low"/"high" rows came back byte-identical to the
+            # medium boot (energy-bench BENCHMARK-REFERENCE F13 / D12). Lift
+            # the key so both renderers see the same dial; the kwargs copy
+            # stays for a Jinja template that reads it there. Harmless on a
+            # non-harmony model: vLLM maps a top-level `reasoning_effort`
+            # onto `enable_thinking` only when that key is absent, and every
+            # config that pins one never sets the other.
+            if "reasoning_effort" in chat_template_kwargs:
+                payload["reasoning_effort"] = chat_template_kwargs["reasoning_effort"]
 
         if stream:
             (
