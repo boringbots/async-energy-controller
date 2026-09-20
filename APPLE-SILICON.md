@@ -4,14 +4,26 @@
 graphics card.
 
 ```bash
-pip install async-energy-controller
+git clone https://github.com/boringbots/async-energy-controller.git
+cd async-energy-controller
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .                    # pulls the Apple energy backend too
+
 ollama serve &                      # or llama-server, if you prefer
 ollama pull qwen3.5:9b-q4_K_M       # the fixed reference model, ~6 GB
 async-energy-controller bench quick
 ```
 
-That is the whole setup. The energy backend comes with the package on an
-arm64 Mac and nowhere else, so there is still exactly one thing to install.
+That is the whole setup. The energy backend (`zeus-apple-silicon`) is a
+platform-marked dependency, so `pip install -e .` pulls it on an arm64 Mac
+and on no other machine -- there is still exactly one thing to install, and
+no `--extra` to remember.
+
+**This package is not on PyPI**, so it is a clone rather than a plain
+`pip install <name>`; the repo is the distribution. Use a Python 3.12+
+interpreter that is genuinely arm64 -- if `python3` came from an x86 Homebrew
+or is running under Rosetta, the platform marker will not match and you will
+get the NVML path and its confusing error.
 
 ### How much memory you need
 
