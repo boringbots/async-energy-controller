@@ -29,7 +29,8 @@
         "quick",
         "calibrate",
         "medium",
-        "full"
+        "full",
+        "reference"
       ]
     },
     "nodes": {

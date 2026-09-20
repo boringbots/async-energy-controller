@@ -57,6 +57,11 @@ from hmasync_controller.bench.apple_sampler import (
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
 from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
+from hmasync_controller.bench.reference import (
+    ReferenceWeightsMismatchError,
+    format_reference_comparison,
+    run_reference_suite,
+)
 from hmasync_controller.bench.quick import (
     AllTasksFailedError,
     ModelNotAvailableError,
@@ -956,6 +961,11 @@ BENCH_CALIBRATE_TIMEOUT_S = 10 * 60.0
 """Backstop for the ~3-5 minute calibrate probe -- generous headroom over
 the target, not itself a target (same posture as BENCH_QUICK_TIMEOUT_S)."""
 
+BENCH_REFERENCE_TIMEOUT_S = 3 * 60 * 60.0
+"""Backstop for the anchor: 100 gsm8k_platinum items at the ~39 s/item
+measured on an M3 with thinking off is ~66 min, so this is ~2.5x headroom for
+a slower box. Scaled again on Apple Silicon like every other backstop."""
+
 BENCH_MEDIUM_TIMEOUT_S = 4 * 60 * 60.0
 """Backstop for the 4-model medium tier (~2 h measured target, 2x headroom)."""
 
@@ -1216,6 +1226,16 @@ def _add_bench_timeout_arg(
             f"shorter run. Overrides BENCH_{suite.upper()}_TIMEOUT_S."
         ),
     )
+
+
+def _add_bench_thinking_arg(parser: argparse.ArgumentParser) -> None:
+    """The thinking-axis override, for the suites that HAVE an axis.
+
+    Deliberately not added to `bench reference`: the Efficiency Index anchor
+    pins `enable_thinking=false`, so a run with it flipped is a different
+    configuration wearing the anchor's name. Offering the flag there would
+    advertise a knob that must not be turned.
+    """
     parser.add_argument(
         "--thinking",
         action="store_true",
@@ -1230,6 +1250,58 @@ def _add_bench_timeout_arg(
         ),
     )
 
+
+
+
+def run_bench_reference(
+    settings: Settings,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float | None = None,
+) -> tuple[int, str]:
+    """Reproduce the Efficiency Index anchor and report it beside the lab's.
+
+    No `thinking` parameter: the anchor pins `enable_thinking=false`, and a
+    run with it flipped is a different configuration wearing the anchor's
+    name. Exit codes follow `_run_bench_suite_cli`, plus 2 for serving the
+    wrong weights -- an operator error with an exact remedy, not a failure of
+    this box.
+    """
+    timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_REFERENCE_TIMEOUT_S)
+    try:
+        code, message = _run_bench_suite_cli(
+            settings,
+            _reference_with_comparison(
+                run_reference_suite(
+                    restore_to_factory_default=_bench_restore_to_factory_default(settings),
+                    budget_s=timeout_s,
+                )
+            ),
+            suite="reference",
+            submit_fn=submit_fn,
+            now_fn=now_fn,
+            timeout_s=timeout_s,
+        )
+    except ReferenceWeightsMismatchError as e:
+        return 2, str(e)
+    if _REFERENCE_COMPARISON:
+        message = f"{message}\n\n{_REFERENCE_COMPARISON[-1]}"
+    return code, message
+
+
+# The comparison line is built where the result exists (inside the awaited
+# coroutine) but printed by the sync caller above, so it is stashed rather
+# than threaded through `_run_bench_suite_cli`'s fixed signature -- that
+# helper is shared with four other suites and widening it for one of them
+# would be the wrong trade.
+_REFERENCE_COMPARISON: list[str] = []
+
+
+async def _reference_with_comparison(coro: Any) -> Any:
+    result = await coro
+    _REFERENCE_COMPARISON.append(format_reference_comparison(result))
+    return result
 
 
 def run_bench_tier(
@@ -1481,6 +1553,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_quick, "quick", BENCH_QUICK_TIMEOUT_S)
+    _add_bench_thinking_arg(bench_quick)
     bench_calibrate = bench_sub.add_parser(
         "calibrate",
         help=(
@@ -1491,6 +1564,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_calibrate, "calibrate", BENCH_CALIBRATE_TIMEOUT_S)
+    _add_bench_thinking_arg(bench_calibrate)
     bench_medium = bench_sub.add_parser(
         "medium",
         help=(
@@ -1500,6 +1574,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_medium, "medium", BENCH_MEDIUM_TIMEOUT_S)
+    _add_bench_thinking_arg(bench_medium)
     bench_full = bench_sub.add_parser(
         "full",
         help=(
@@ -1509,6 +1584,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_full, "full", BENCH_FULL_TIMEOUT_S)
+    _add_bench_thinking_arg(bench_full)
+    bench_reference = bench_sub.add_parser(
+        "reference",
+        help=(
+            "Reproduce energy-bench's Efficiency Index anchor -- Qwen3.5-9B "
+            "Q4_K_M GGUF on llama.cpp, gsm8k_platinum x100, thinking off, "
+            "stock power. The ONLY mode whose number is comparable to a lab "
+            "row (.114: 975 J/correct, accuracy 0.81). ~1 hour. Needs "
+            "llama-server serving the pinned GGUF; refuses other weights."
+        ),
+    )
+    _add_bench_timeout_arg(bench_reference, "reference", BENCH_REFERENCE_TIMEOUT_S)
     bench_submit = bench_sub.add_parser(
         "submit",
         help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
@@ -1561,6 +1648,14 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 thinking=(
                     settings.BENCH_THINKING if args.thinking is None else args.thinking
+                ),
+            )
+        elif bench_sub == "reference":
+            code, message = run_bench_reference(
+                settings,
+                submit_fn=_bench_submit_fn,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout, None, BENCH_REFERENCE_TIMEOUT_S
                 ),
             )
         elif bench_sub in ("medium", "full"):

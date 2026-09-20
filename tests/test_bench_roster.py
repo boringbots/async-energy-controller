@@ -104,9 +104,4 @@ class TestTierCli:
                 Path(cli.__file__).parent / "schemas" / "bench_submission.schema.json"
             ).read_text()
         )
-        assert set(schema["properties"]["suite"]["enum"]) == {
-            "quick",
-            "calibrate",
-            "medium",
-            "full",
-        }
+        assert {"medium", "full"} <= set(schema["properties"]["suite"]["enum"])

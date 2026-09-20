@@ -539,6 +539,57 @@ tasks stopping on a blank line — `mmlu`, `mmlu_redux`, `gpqa_diamond`,
 `hellaswag` — must drop that stop first, or generation dies at the reasoning
 trace's first paragraph break.
 
+### The whole ladder
+
+| Command | What it measures | Models | Time |
+|---|---|---|---|
+| `bench calibrate` | scheduling figures, fast | 1 | ~5 min |
+| `bench quick` | this box on a known workload | 1 | ~30 min |
+| `bench medium` | **which model runs best here** | 4 | ~2 h |
+| `bench full` | medium, plus the thinking axis | 4 × 2 | ~8 h |
+| `bench reference` | **the Efficiency Index anchor** | 1 | ~1 h |
+
+`medium` and `full` measure a pinned roster — each entry fixed by Ollama tag
+*and* manifest digest, because a quantization name is not a set of weights.
+They never pull: a model that is not present is reported with the exact
+`ollama pull` and its size, and one too large for the box is skipped rather
+than suggested.
+
+```bash
+async-energy-controller bench medium
+#   roster: qwen3.5:9b-q4_K_M            pulled   -> measure
+#   roster: llama3.1:8b-instruct-q4_K_M  MISSING  -> ollama pull llama3.1:8b-instruct-q4_K_M  (4.9 GB)
+```
+
+### The anchor — `bench reference`
+
+Every other mode measures something about *your* box. This one reproduces the
+single configuration energy-bench normalizes everything against, so its
+number can sit beside a lab row and mean something:
+
+> Qwen3.5-9B, Q4_K_M GGUF, llama.cpp llama-server, batch 1, stock power,
+> gsm8k_platinum, 100 items, seed 1234, 5-shot, thinking off
+
+The lab's own RTX 3090 node measures this at **83,348 J, 975 J/correct,
+accuracy 0.81**, reproducing to 0.095% over six cold boots.
+
+It needs llama-server serving the *pinned* weights, and **refuses anything
+else** — an Efficiency Index computed against a different community Q4_K_M
+build is not comparable to anything, and a wrong anchor is worse than none
+because it looks like a real number:
+
+```bash
+huggingface-cli download lmstudio-community/Qwen3.5-9B-GGUF Qwen3.5-9B-Q4_K_M.gguf \
+  --revision 1379f25c6b505a3fc737bd7818cb09389cf807c1 --local-dir ./ref
+llama-server -m ./ref/Qwen3.5-9B-Q4_K_M.gguf -c 4096 --port 8080
+
+async-energy-controller bench reference
+```
+
+Note what a Mac can and cannot tell you here: accuracy is hardware-independent
+and travels, joules are a different vendor's model of different silicon and do
+not. The run says so itself when `energy_source` is not `counter`.
+
 ### A faster option — `bench calibrate`
 
 ```bash

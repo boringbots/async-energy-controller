@@ -862,7 +862,8 @@ async def _run_bench_suite(
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
     model, measure `tasks`, attempt the mini power sweep (at most
-    `max_sweep_points` capped points when given), and return everything the
+    `max_sweep_points` capped points when given; 0 skips the sweep outright,
+    for a suite that pins stock power), and return everything the
     CLI layer needs to write artifacts and build a submission bundle. Only
     WHAT gets measured differs between the two callers -- the detection,
     restore-in-finally, and error-handling contract below is identical for
@@ -1000,7 +1001,16 @@ async def _run_bench_suite(
             ),
             None,
         )
-        if gsm8k_baseline is not None:
+        if max_sweep_points == 0:
+            # The anchor is stock power. The ladders are a separate, justified
+            # axis (reference-wave.md), and capping the card mid-run would
+            # change the very thing every other submission normalizes against.
+            skipped_reason = (
+                "this suite pins stock power -- the power ladder is a separate "
+                "axis and is not part of the configuration being reproduced"
+            )
+            logger.info("mini power sweep: skipped (%s)", skipped_reason)
+        elif gsm8k_baseline is not None:
             logger.info(
                 "mini power sweep: stock + up to %d capped point(s) derived from "
                 "this card's own power limit (needs NVML SetPowerManagementLimit "
