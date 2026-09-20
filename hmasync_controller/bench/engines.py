@@ -123,6 +123,34 @@ class OllamaAdapter:
         """Always empty -- this adapter never launches anything to have args."""
         return []
 
+    async def list_models(self) -> set[str]:
+        """Every model tag already pulled on this server, via `GET /api/tags`.
+
+        Used by the multi-model tiers to split a roster into "measurable now"
+        and "needs an `ollama pull`". Returns tags exactly as the server
+        reports them, so a caller matching a pinned tag is comparing like
+        with like -- `qwen3.5:9b` and `qwen3.5:9b-q4_K_M` are different
+        weights and must not be conflated.
+
+        Raises:
+            VLLMUnavailableError: If the Ollama server is unreachable.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{self._base_url}/api/tags")
+        except httpx.TimeoutException as e:
+            raise VLLMUnavailableError(
+                f"Ollama unreachable at {self._base_url}: timed out"
+            ) from e
+        except httpx.RequestError as e:
+            raise VLLMUnavailableError(f"Ollama unreachable at {self._base_url}: {e}") from e
+        if response.status_code != 200:
+            raise VLLMUnavailableError(
+                f"Ollama /api/tags failed: HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        return {m["name"] for m in response.json().get("models", []) if m.get("name")}
+
     async def verify_model_pulled(self, model: str) -> str | None:
         """Pre-flight gate: confirm `model` is already pulled via `POST /api/show`.
 

@@ -62,8 +62,11 @@ from hmasync_controller.bench.quick import (
     ModelNotAvailableError,
     NoEngineDetectedError,
     NvmlUnavailableError,
+    NoRosterModelsError,
+    QuickSuiteResult,
     run_calibrate_suite,
     run_quick_suite,
+    run_tier_suite,
 )
 from hmasync_controller.config import (
     BENCH_CONSENT_TEXT,
@@ -953,6 +956,15 @@ BENCH_CALIBRATE_TIMEOUT_S = 10 * 60.0
 """Backstop for the ~3-5 minute calibrate probe -- generous headroom over
 the target, not itself a target (same posture as BENCH_QUICK_TIMEOUT_S)."""
 
+BENCH_MEDIUM_TIMEOUT_S = 4 * 60 * 60.0
+"""Backstop for the 4-model medium tier (~2 h measured target, 2x headroom)."""
+
+BENCH_FULL_TIMEOUT_S = 16 * 60 * 60.0
+"""Backstop for full: the medium roster twice over, once per thinking
+setting. Thinking-on is ~9x the energy and ~9x the wall clock on the same
+items, so the headroom here is over a target that is itself mostly the ON
+half."""
+
 BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER = 3.0
 """Both backstops above were measured on NVIDIA hardware. The suite's item
 counts are FIXED -- that is what makes two submissions comparable -- so a
@@ -1219,6 +1231,69 @@ def _add_bench_timeout_arg(
     )
 
 
+
+def run_bench_tier(
+    settings: Settings,
+    tier: str,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float | None = None,
+    thinking: bool = False,
+) -> tuple[int, str]:
+    """Run a multi-model tier and bundle every cell it measured.
+
+    `full` sweeps the thinking axis itself, so an explicit `--thinking` there
+    would ask for half the tier; the flag is honored for `medium`, where the
+    whole tier shares one pinned setting.
+    """
+    timeout_s = _resolve_bench_timeout_s(
+        timeout_s,
+        None,
+        BENCH_MEDIUM_TIMEOUT_S if tier == "medium" else BENCH_FULL_TIMEOUT_S,
+    )
+    axis = (False, True) if tier == "full" else (thinking,)
+    return _run_bench_suite_cli(
+        settings,
+        _merge_tier_results(
+            run_tier_suite(
+                restore_to_factory_default=_bench_restore_to_factory_default(settings),
+                budget_s=timeout_s,
+                thinking_axis=axis,
+                tier=tier,
+            )
+        ),
+        suite=tier,
+        submit_fn=submit_fn,
+        now_fn=now_fn,
+        timeout_s=timeout_s,
+    )
+
+
+async def _merge_tier_results(coro: Any) -> Any:
+    """Flatten a tier's per-cell results into one suite-shaped result.
+
+    Every cell shares this box's engine and GPU, so the bundle keeps the
+    first cell's identity fields and concatenates the measured rows. The rows
+    themselves each carry their own model/quantization/thinking_mode, which
+    is what a consumer groups by -- the envelope was never the grain.
+    """
+    results = await coro
+    head = results[0]
+    merged = QuickSuiteResult(
+        engine_name=head.engine_name,
+        engine_base_url=head.engine_base_url,
+        model=head.model,
+        gpu_info=head.gpu_info,
+        engine_version=head.engine_version,
+        power_sweep_skipped_reason=head.power_sweep_skipped_reason,
+    )
+    for r in results:
+        merged.runs.extend(r.runs)
+        merged.task_runs.extend(r.task_runs)
+    return merged
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         # No explicit `prog`: two console scripts point here
@@ -1416,6 +1491,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_calibrate, "calibrate", BENCH_CALIBRATE_TIMEOUT_S)
+    bench_medium = bench_sub.add_parser(
+        "medium",
+        help=(
+            "Measure the pinned 4-model roster on the same three tasks, so "
+            "you can see which model runs best on THIS box. ~2 hours. Not "
+            "Efficiency-Index comparable -- use `bench reference` for that."
+        ),
+    )
+    _add_bench_timeout_arg(bench_medium, "medium", BENCH_MEDIUM_TIMEOUT_S)
+    bench_full = bench_sub.add_parser(
+        "full",
+        help=(
+            "The medium roster measured with thinking both off AND on -- the "
+            "axis energy-bench found worth ~9x the energy and decisive on one "
+            "task in four. ~8 hours."
+        ),
+    )
+    _add_bench_timeout_arg(bench_full, "full", BENCH_FULL_TIMEOUT_S)
     bench_submit = bench_sub.add_parser(
         "submit",
         help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
@@ -1465,6 +1558,20 @@ def main(argv: list[str] | None = None) -> int:
                     args.timeout,
                     settings.BENCH_CALIBRATE_TIMEOUT_S,
                     BENCH_CALIBRATE_TIMEOUT_S,
+                ),
+                thinking=(
+                    settings.BENCH_THINKING if args.thinking is None else args.thinking
+                ),
+            )
+        elif bench_sub in ("medium", "full"):
+            code, message = run_bench_tier(
+                settings,
+                bench_sub,
+                submit_fn=_bench_submit_fn,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout,
+                    None,
+                    BENCH_MEDIUM_TIMEOUT_S if bench_sub == "medium" else BENCH_FULL_TIMEOUT_S,
                 ),
                 thinking=(
                     settings.BENCH_THINKING if args.thinking is None else args.thinking

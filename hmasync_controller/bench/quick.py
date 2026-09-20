@@ -108,6 +108,7 @@ from hmasync_controller.bench.sampler import (
     TelemetrySample,
     select_gpu_sampler,
 )
+from hmasync_controller.bench.roster import RosterEntry, select_roster
 from hmasync_controller.bench.tasks import load_task
 from hmasync_controller.bench.thermal import (
     SustainedThermalThrottleError,
@@ -153,6 +154,8 @@ __all__ = [
     "run_power_sweep",
     "run_quick_suite",
     "run_quick_task",
+    "run_tier_suite",
+    "NoRosterModelsError",
 ]
 
 # Verified live 2026-08-22 by energy-bench's US-ENG-14 (HF API search + a
@@ -310,7 +313,9 @@ class QuickModel:
     surface alone."""
 
 
-async def resolve_quick_model(engine: DetectedEngine) -> QuickModel:
+async def resolve_quick_model(
+    engine: DetectedEngine, entry: "RosterEntry | None" = None
+) -> QuickModel:
     """Resolve + verify the model this run will measure. Never pulls.
 
     Raises:
@@ -319,7 +324,9 @@ async def resolve_quick_model(engine: DetectedEngine) -> QuickModel:
             loaded at all.
     """
     if engine.name == "ollama":
-        tag = QUICK_REFERENCE_MODELS["ollama"]["tag"]
+        # `entry` is a roster model for the medium/full tiers; None keeps the
+        # pinned reference `bench quick` exists to measure.
+        tag = entry.tag if entry else QUICK_REFERENCE_MODELS["ollama"]["tag"]
         try:
             family = await engine.adapter.verify_model_pulled(tag)
         except OllamaModelNotPulledError as e:
@@ -328,8 +335,10 @@ async def resolve_quick_model(engine: DetectedEngine) -> QuickModel:
         return QuickModel(
             name=tag,
             note=note,
-            record_model=QUICK_REFERENCE_MODEL_HF_ID,
-            record_quantization=QUICK_REFERENCE_MODELS["ollama"]["quantization"],
+            record_model=entry.hf_id if entry else QUICK_REFERENCE_MODEL_HF_ID,
+            record_quantization=(
+                entry.quantization if entry else QUICK_REFERENCE_MODELS["ollama"]["quantization"]
+            ),
         )
 
     # llama.cpp: attach-only, no swap-by-request API -- measure whatever is
@@ -848,6 +857,7 @@ async def _run_bench_suite(
     restore_to_factory_default: bool = True,
     budget_s: float | None = None,
     thinking: bool = False,
+    entry: "RosterEntry | None" = None,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -905,7 +915,7 @@ async def _run_bench_suite(
         )
     logger.info("  engine: %s at %s", detected.name, detected.base_url)
 
-    model = await resolve_quick_model(detected)
+    model = await resolve_quick_model(detected, entry)
     logger.info("  model: %s", model.note)
 
     telemetry = select_gpu_sampler()
@@ -1113,6 +1123,119 @@ async def run_quick_suite(
         thinking=thinking,
     )
 
+
+
+# ============================================================
+# Multi-model tiers (medium / full)
+# ============================================================
+
+
+class NoRosterModelsError(QuickError):
+    """No roster model for this tier is pulled, so there is nothing to
+    measure. The message names the exact `ollama pull` for each one."""
+
+
+async def run_tier_suite(
+    tier: str,
+    *,
+    host: str = "localhost",
+    ollama_port: int = DEFAULT_OLLAMA_PORT,
+    llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
+    target_host: str | None = None,
+    restore_to_factory_default: bool = True,
+    budget_s: float | None = None,
+    thinking_axis: tuple[bool, ...] = (False,),
+    budget_gb: float | None = None,
+) -> list[QuickSuiteResult]:
+    """Measure a tier's roster, one `QuickSuiteResult` per (model, thinking).
+
+    The tiers answer "which model runs best on MY box", which `bench quick`
+    structurally cannot: quick pins one model so its number means something
+    across submitters, and verifying that pin is the whole point of it.
+
+    Each cell is a full `_run_bench_suite` pass rather than a shared one, so
+    a model that fails mid-tier costs its own cell and nothing else -- on a
+    multi-hour sweep that is the difference between losing one row and losing
+    the run. Engine detection per cell is one HTTP call; the KV cache has to
+    be rebuilt per model regardless.
+
+    `thinking_axis` is the pinned settings to sweep. `(False,)` for medium;
+    `(False, True)` for full, which spends its extra time on the axis
+    energy-bench measured at ~9x the energy rather than on more models.
+
+    Raises:
+        NoEngineDetectedError: Neither Ollama nor llama-server answered.
+        NoRosterModelsError: The engine is up but no roster model for this
+            tier is pulled.
+    """
+    detected = await detect_engine(None, host, ollama_port, llamacpp_port)
+    if detected is None:
+        raise NoEngineDetectedError(
+            f"no Ollama or llama.cpp server answered on {host} "
+            f"(tried ollama:{ollama_port}, llamacpp:{llamacpp_port}). Start "
+            f"one first -- bench {tier} never launches an engine itself."
+        )
+    if detected.name != "ollama":
+        raise NoRosterModelsError(
+            f"bench {tier} needs Ollama: the roster is pinned by Ollama tag + "
+            f"manifest digest, and llama.cpp attach mode serves exactly one "
+            f"already-loaded model with no way to swap it. Use `bench quick` "
+            f"against llama.cpp, or start Ollama for the multi-model tiers."
+        )
+
+    available = await detected.adapter.list_models()
+    present, missing = select_roster(tier, available_tags=available, budget_gb=budget_gb)
+
+    for entry in present:
+        logger.info("  roster: %-28s pulled   -> measure", entry.tag)
+    for entry in missing:
+        logger.warning(
+            "  roster: %-28s MISSING  -> ollama pull %s  (%.1f GB)",
+            entry.tag, entry.tag, entry.size_gb,
+        )
+    if not present:
+        raise NoRosterModelsError(
+            f"no bench {tier} roster model is pulled on this Ollama server. "
+            f"Pull at least one first: "
+            + "; ".join(f"ollama pull {e.tag}" for e in missing)
+        )
+
+    results: list[QuickSuiteResult] = []
+    total = len(present) * len(thinking_axis)
+    cell = 0
+    for entry in present:
+        for thinking in thinking_axis:
+            cell += 1
+            logger.info(
+                "=== [%d/%d] %s  thinking=%s ===",
+                cell, total, entry.tag, "on" if thinking else "off",
+            )
+            try:
+                results.append(
+                    await _run_bench_suite(
+                        engine_choice="ollama",
+                        host=host,
+                        ollama_port=ollama_port,
+                        llamacpp_port=llamacpp_port,
+                        target_host=target_host,
+                        tasks=QUICK_TASKS,
+                        max_sweep_points=None,
+                        label_prefix_stem=tier,
+                        restore_to_factory_default=restore_to_factory_default,
+                        budget_s=budget_s,
+                        thinking=thinking,
+                        entry=entry,
+                    )
+                )
+            except (AllTasksFailedError, ModelNotAvailableError) as e:
+                # One dead cell must not sink a multi-hour sweep.
+                logger.warning("  %s (thinking=%s) failed: %s", entry.tag, thinking, e)
+
+    if not results:
+        raise AllTasksFailedError(
+            f"every bench {tier} cell failed -- nothing was measured."
+        )
+    return results
 
 CALIBRATE_TASK_N_ITEMS = 15
 """Item count for calibrate's one task -- the spec's '~15 items'."""

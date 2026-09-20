@@ -27,7 +27,9 @@
     "suite": {
       "enum": [
         "quick",
-        "calibrate"
+        "calibrate",
+        "medium",
+        "full"
       ]
     },
     "nodes": {
@@ -182,7 +184,10 @@
           "type": "number"
         },
         "max_tokens": {
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "seed": {
           "type": "integer"

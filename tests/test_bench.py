@@ -76,8 +76,18 @@ def test_bundle_with_suite_calibrate_is_valid():
 
 
 def test_bundle_with_unknown_suite_value_is_rejected():
-    errors = bench.validate_bundle(_minimal_bundle(schema_version="2", suite="full"))
+    """The enum is quick/calibrate/medium/full -- anything else is a typo or a
+    newer controller, and either way must not be pooled silently."""
+    errors = bench.validate_bundle(
+        _minimal_bundle(schema_version="2", suite="exhaustive")
+    )
     assert any("suite" in e for e in errors)
+
+
+def test_the_multi_model_tiers_are_accepted_suites():
+    for suite in ("quick", "calibrate", "medium", "full"):
+        errors = bench.validate_bundle(_minimal_bundle(schema_version="2", suite=suite))
+        assert not any("suite" in e for e in errors), (suite, errors)
 
 
 def test_missing_required_field_is_reported():
