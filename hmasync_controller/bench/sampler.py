@@ -23,7 +23,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from hmasync_controller.nvml_reader import read_energy_counter_mj, read_nvml_channels
 
@@ -79,9 +79,82 @@ def _try_nvml(fn: Callable[[], Any]) -> Any:
         return None
 
 
+@runtime_checkable
+class GpuSampler(Protocol):
+    """What `bench quick` needs from a telemetry source.
+
+    Named in `quick.py`'s comments since US-COMM-07 but never actually
+    written down until Apple Silicon needed a second implementation. The two
+    today are `LocalNvmlSampler` (NVIDIA, via NVML) and
+    `bench.apple_sampler.AppleSiliconSampler` (Apple Silicon, via IOReport);
+    `select_gpu_sampler()` below picks between them.
+
+    Two rules a new implementation must honour, because callers depend on
+    them and neither is checkable from the type:
+
+    1. `gpu_energy_mj` is CUMULATIVE and monotonic across a start/stop
+       window. `metrics.compute.compute_counter_energy` takes last-minus-
+       first and reads any decrease as a counter reset, discarding the run's
+       energy entirely.
+    2. A channel this hardware cannot report is `None`, never 0.0 and never
+       a plausible-looking guess (Rule 3). Downstream withholds metrics
+       built on a missing channel; it cannot detect a fabricated one.
+    """
+
+    sample_hz: int
+    energy_source: str
+
+    def sample(self) -> TelemetrySample: ...
+    async def start(self, run_id: str = "") -> None: ...
+    async def stop(self) -> list[TelemetrySample]: ...
+    def current_samples(self) -> list[TelemetrySample]: ...
+    async def gpu_info(self) -> dict[str, object]: ...
+    async def get_power_limit_w(self) -> int | None: ...
+    async def get_power_limit_default_w(self) -> int | None: ...
+    async def get_power_limit_constraints_w(self) -> tuple[int | None, int | None]: ...
+    async def set_power_limit_w(self, watts: int) -> int | None: ...
+    def close(self) -> None: ...
+
+
+ENERGY_SOURCE_COUNTER = "counter"
+"""`energy_source` for a run measured by NVML's hardware energy counter."""
+
+
+def select_gpu_sampler(sample_hz: int = 5) -> GpuSampler:
+    """The telemetry source for THIS box.
+
+    Apple Silicon first, because the test is cheap and unambiguous: an arm64
+    Mac is never an NVML box. NVML takes everything else, so a Linux or
+    Windows box with no NVIDIA GPU still fails with `NvmlUnavailableError`'s
+    specific message about needing a local GPU -- the error people have been
+    reading since US-MERGE-02.
+
+    The branch is on the HARDWARE ALONE, deliberately -- not on whether
+    `zeus_apple_silicon` happens to import. An arm64 Mac missing the backend
+    gets `AppleSiliconSampler` anyway, so the failure it raises is
+    `AppleEnergyUnavailableError`, which says to install
+    `zeus-apple-silicon`. Falling through to NVML there would tell a Mac user
+    they have "no local NVIDIA GPU", sending them to look for a graphics card
+    their laptop was never going to have.
+
+    Construction does no I/O either way, so this never raises -- both
+    samplers only reach for hardware on their first `start()`/`gpu_info()`.
+    """
+    from hmasync_controller.bench.apple_sampler import (
+        AppleSiliconSampler,
+        is_apple_silicon,
+    )
+
+    if is_apple_silicon():
+        return AppleSiliconSampler(sample_hz=sample_hz)
+    return LocalNvmlSampler(sample_hz=sample_hz)
+
+
 class LocalNvmlSampler:
     """Tier C's default telemetry source: samples `pynvml` directly on this
     box, in-process, at `sample_hz`."""
+
+    energy_source = ENERGY_SOURCE_COUNTER
 
     def __init__(self, sample_hz: int = 5) -> None:
         self.sample_hz = sample_hz

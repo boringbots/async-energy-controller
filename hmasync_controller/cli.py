@@ -50,6 +50,7 @@ from hmasync_controller.adapters import (
     normalize_command,
 )
 from hmasync_controller.apiclient import ApiClient
+from hmasync_controller.bench.apple_sampler import AppleEnergyUnavailableError
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
 from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
@@ -1008,7 +1009,16 @@ def _run_bench_suite_cli(
         return 1, f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written"
     except ModelNotAvailableError as e:
         return 2, str(e)
-    except (NoEngineDetectedError, NvmlUnavailableError, AllTasksFailedError) as e:
+    except (
+        NoEngineDetectedError,
+        NvmlUnavailableError,
+        # An arm64 Mac whose energy backend is missing or will not start.
+        # Handled beside the NVML case because it is the same class of
+        # failure -- this box cannot be measured -- and its message already
+        # says exactly what to install.
+        AppleEnergyUnavailableError,
+        AllTasksFailedError,
+    ) as e:
         return 1, str(e)
 
     for run_metrics, task_run in zip(result.runs, result.task_runs, strict=True):

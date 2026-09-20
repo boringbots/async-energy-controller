@@ -56,7 +56,13 @@ Worth stating before you give anything a systemd unit:
 - **It will not phone anywhere else.** One host, the one you configure in
   `.env`. No telemetry vendors, no analytics.
 - **It will not run without a GPU driver — it just measures less.** No NVML
-  means no energy numbers; scheduling still works on duration alone.
+  means no energy numbers; scheduling still works on duration alone. On
+  Apple Silicon there is no driver to want: energy comes from IOReport.
+- **It will not tell you when a Mac is throttling.** Apple exposes no
+  unprivileged thermal-throttle signal, so the benchmark's circuit-breaker
+  cannot fire there and a hot run completes looking healthy. Inferring it
+  from a falling token rate would be a guess, and this package does not
+  present guesses as measurements.
 - **It will not leave your GPU capped after a benchmark.** The suite lowers the
   board power limit while it measures, then restores the card's **factory
   default** — not whatever the limit happened to be when it started, which
@@ -70,7 +76,7 @@ Worth stating before you give anything a systemd unit:
 
 ## Install
 
-Requires **Python 3.12+** and Linux.
+Requires **Python 3.12+**, and Linux or macOS on Apple Silicon.
 
 ```bash
 git clone https://github.com/boringbots/async-energy-controller.git
@@ -86,6 +92,17 @@ install above is also everything the benchmark suite needs — `bench quick` and
 `bench calibrate` (below, under "Optimize + contribute") run with no extra
 flag and no second package to install; there is no separate `energy-bench`
 download.
+
+**On an Apple Silicon Mac** the same command is the whole setup: the energy
+backend is platform-marked, so it installs there and nowhere else, and
+`bench quick` measures GPU, CPU and DRAM energy through IOReport with **no
+sudo**. A Mac reports *more* of the energy story than an NVIDIA box does
+(which reads no CPU or DRAM at all) and less of everything else — no VRAM
+figure, because memory is unified, and **no thermal-throttle detection**,
+which matters on a fanless laptop. Joules from a Mac do not compare to joules
+from an NVIDIA card; accuracy does. Read
+[APPLE-SILICON.md](APPLE-SILICON.md) before trusting a number. Intel Macs are
+not supported.
 
 ## Configure
 
@@ -518,11 +535,14 @@ The profiler samples the GPU at 1 Hz for the length of every run and records
 | `energy_source` | Meaning |
 |---|---|
 | `counter` | Read from the GPU's cumulative energy counter via NVML. Exact. |
+| `ioreport` | Apple Silicon, read from IOReport's energy counters. Counter-based like NVML, no sudo — but a different vendor's model of different silicon, so **never compare its joules to an NVIDIA row's**. See [APPLE-SILICON.md](APPLE-SILICON.md). |
 | `integrated` | No counter available; power samples integrated over the run. Good, but a spike between two samples is invisible. |
 | `null` | The box could not measure it. Not estimated, not backfilled. |
 
 Backends are tried in order: **NVML** → **`nvidia-smi`** → **null**. The null
-profiler is always valid, so the controller runs anywhere. On Intel and AMD CPUs
+profiler is always valid, so the controller runs anywhere. `bench quick`
+picks its sampler from the hardware instead: **IOReport on Apple Silicon,
+NVML everywhere else**. On Intel and AMD CPUs
 the package RAPL counter is also sampled where readable (it is often
 root-only on recent kernels — harmless when it is not).
 

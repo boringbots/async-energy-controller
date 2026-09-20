@@ -723,7 +723,7 @@ class TestQuickModelResolution:
 
 # ============================================================
 # run_quick_suite (US-MERGE-04) -- the new orchestrator this story adds.
-# Every collaborator (detect_engine, resolve_quick_model, LocalNvmlSampler,
+# Every collaborator (detect_engine, resolve_quick_model, select_gpu_sampler,
 # VLLMClient, run_quick_task) is mocked at the module-namespace level, same
 # pattern the classes above already use.
 # ============================================================
@@ -814,7 +814,7 @@ class TestRunQuickSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
         ):
             with pytest.raises(NvmlUnavailableError):
@@ -840,7 +840,7 @@ class TestRunQuickSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch("hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(side_effect=_always_fail)),
         ):
@@ -868,7 +868,7 @@ class TestRunQuickSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch(
                 "hmasync_controller.bench.quick.run_quick_task",
@@ -911,7 +911,7 @@ class TestRunQuickSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch(
                 "hmasync_controller.bench.quick.run_quick_task",
@@ -974,7 +974,7 @@ class TestRunCalibrateSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch(
                 "hmasync_controller.bench.quick.run_quick_task",
@@ -1010,7 +1010,7 @@ class TestRunCalibrateSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch(
                 "hmasync_controller.bench.quick.run_quick_task",
@@ -1048,7 +1048,7 @@ class TestRunCalibrateSuite:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch("hmasync_controller.bench.quick.run_quick_task", new=AsyncMock(side_effect=_always_fail)),
         ):
@@ -1091,7 +1091,7 @@ class TestPowerLimitRestoreTarget:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch("hmasync_controller.bench.quick.run_quick_task", _fake_run_quick_task),
         ):
@@ -1160,7 +1160,7 @@ class TestBenchRestorePolicy:
         with (
             patch("hmasync_controller.bench.quick.detect_engine", _detect),
             patch("hmasync_controller.bench.quick.resolve_quick_model", _resolve),
-            patch("hmasync_controller.bench.quick.LocalNvmlSampler", return_value=telemetry),
+            patch("hmasync_controller.bench.quick.select_gpu_sampler", return_value=telemetry),
             patch("hmasync_controller.bench.quick.VLLMClient"),
             patch("hmasync_controller.bench.quick.run_quick_task", _fake_run_quick_task),
         ):

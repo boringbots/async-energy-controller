@@ -31,23 +31,41 @@ inlined below as their own constants (`QUICK_REFERENCE_MODEL_HF_ID`,
 whole `grading` module for three scalars this package never uses for
 anything else.
 
-## Telemetry: local NVML only
+## Telemetry: local, and whichever local source this box has
 
 energy-bench's Tier C also supports `--collector-host`, sampling from a
 remote collector container over HTTP (`CollectorTelemetrySource`). No
-collector container exists in this package's world -- `bench.sampler.
-LocalNvmlSampler` (US-MERGE-02, already unified with `profiler.py`'s 1 Hz
-sampler) is the only telemetry source `run_quick_suite` ever constructs.
+collector container exists in this package's world: `run_quick_suite` only
+ever constructs an IN-PROCESS sampler, chosen by
+`bench.sampler.select_gpu_sampler()`.
+
+There are two, behind the `GpuSampler` protocol:
+
+    LocalNvmlSampler       NVIDIA, via NVML (US-MERGE-02, unified with
+                           `profiler.py`'s 1 Hz sampler). energy_source
+                           'counter'.
+    AppleSiliconSampler    Apple Silicon, via IOReport, no sudo.
+                           energy_source 'ioreport'.
+
+The third value matters: a Mac's energy comes off a different vendor's
+model on different silicon, so it is labelled as a distinct instrument and
+never pools with an NVIDIA row. Read `bench/apple_sampler.py`'s docstring
+before comparing joules across the two -- and note that the thermal
+circuit-breaker below is INERT on Apple Silicon, which for a fanless laptop
+under a sustained benchmark is the caveat that matters most.
 
 ## Scope deliberately left out, same as energy-bench's Tier C
 
 No Home Assistant anywhere in this module: `RunMetrics.ambient_c_start` is
 always `None`, and `measurement_tier` reads 'C' unconditionally, since
 `compute_metrics()` derives it from wall-sample presence alone. CPU/RAPL
-energy is also not read locally -- `LocalNvmlSampler` (bench.sampler) has no
-local RAPL reader, so `rapl_max_energy_range_uj`/`_dram_...` always resolve
-to `None` for a run measured here (see `run_quick_task`'s note on reading
-those attributes defensively).
+energy is not read locally ON AN NVIDIA BOX -- `LocalNvmlSampler` has no
+RAPL reader, so `total_joules_cpu`/`_dram` stay `None` there.
+`AppleSiliconSampler` DOES carry both: IOReport reports CPU-package and
+DRAM energy alongside the GPU's, so a Mac run fills those columns where an
+NVIDIA run leaves them empty. Neither source sets
+`rapl_max_energy_range_uj`, and neither needs to -- see `run_quick_task`'s
+note on why a monotonic counter never reaches the wrap correction.
 
 ## Hardware safety: thermal reaction (US-MERGE-07)
 
@@ -84,7 +102,12 @@ from hmasync_controller.bench.metrics import (
     RunMetrics,
     compute_metrics,
 )
-from hmasync_controller.bench.sampler import LocalNvmlSampler, NvmlUnavailableError, TelemetrySample
+from hmasync_controller.bench.sampler import (
+    GpuSampler,
+    NvmlUnavailableError,
+    TelemetrySample,
+    select_gpu_sampler,
+)
 from hmasync_controller.bench.tasks import load_task
 from hmasync_controller.bench.thermal import (
     SustainedThermalThrottleError,
@@ -346,7 +369,7 @@ class QuickTaskRun:
 
 async def run_quick_task(
     vllm_client: VLLMClient,
-    telemetry: LocalNvmlSampler,
+    telemetry: GpuSampler,
     model_name: str,
     task_name: str,
     n_items: int,
@@ -425,11 +448,14 @@ async def run_quick_task(
         inference_results=inference_results,
         telemetry_samples=telemetry_samples,
         streaming_used=streaming_used,
-        # `bench.sampler.LocalNvmlSampler` has no local RAPL reader (see
-        # module docstring), so these never resolve to a real value today --
-        # read via getattr rather than a direct attribute access so a
-        # duck-typed test double (or a future telemetry source that DOES
-        # carry RAPL) doesn't need to define attributes it has no use for.
+        # Only a wrapping counter needs a range to correct it.
+        # `LocalNvmlSampler` reads no RAPL at all, and `AppleSiliconSampler`
+        # accumulates monotonically, so neither defines these and both
+        # resolve to None -- which is right in both cases:
+        # `_wrap_corrected_rapl_energy_j` only consults the range on a
+        # NEGATIVE step, and neither source ever takes one. getattr rather
+        # than attribute access so a duck-typed double, or a real RAPL reader
+        # later, needs to define only what it actually has.
         rapl_max_energy_range_uj=getattr(telemetry, "rapl_max_energy_range_uj", None),
         rapl_dram_max_energy_range_uj=getattr(telemetry, "rapl_dram_max_energy_range_uj", None),
     )
@@ -474,7 +500,7 @@ def _derive_power_sweep_caps_w(
 
 async def run_power_sweep(
     vllm_client: VLLMClient,
-    telemetry: LocalNvmlSampler,
+    telemetry: GpuSampler,
     model_name: str,
     *,
     n_items: int,
@@ -709,8 +735,12 @@ async def _run_bench_suite(
         NoEngineDetectedError: Neither Ollama nor llama-server answered.
         ModelNotAvailableError: The reference model isn't pulled (Ollama) or
             nothing is loaded at all (llama.cpp).
-        NvmlUnavailableError: No local NVML-backed GPU -- this package's one
-            hard hardware requirement for a bench run.
+        NvmlUnavailableError: No local NVML-backed GPU on a box where NVML
+            is the expected source. Apple Silicon is measured through
+            IOReport instead (`bench.apple_sampler`), chosen automatically by
+            `select_gpu_sampler`; an arm64 Mac that is MISSING the
+            `zeus-apple-silicon` extra raises this too, with a hint pointing
+            at the extra rather than at a graphics card.
         AllTasksFailedError: Every task in `tasks` failed -- nothing was
             measured, so there is nothing to bundle.
     """
@@ -736,7 +766,12 @@ async def _run_bench_suite(
     model = await resolve_quick_model(detected)
     logger.info("  model: %s", model.note)
 
-    telemetry = LocalNvmlSampler()
+    telemetry = select_gpu_sampler()
+    logger.info(
+        "  telemetry: %s (energy_source=%s)",
+        type(telemetry).__name__,
+        telemetry.energy_source,
+    )
     split = urlsplit(detected.base_url)
     vllm_client = VLLMClient(host=split.hostname or host, port=split.port or 80)
     vllm_client.base_url = detected.base_url

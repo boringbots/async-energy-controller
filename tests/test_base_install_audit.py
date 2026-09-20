@@ -58,6 +58,16 @@ EXPECTED_BASE_DEPS = {
     "langdetect",
 }
 
+# The eighth, and the only one allowed outside the agreed seven: Apple
+# Silicon's energy backend. It carries a platform marker, so on every
+# non-Mac box the install closure is exactly the seven above -- which is
+# what the "thin base install" success metric was protecting. Listed
+# separately rather than folded into the set so that dropping the marker
+# would FAIL the audit instead of quietly widening every install.
+PLATFORM_MARKED_DEPS = {
+    "zeus-apple-silicon": "sys_platform == 'darwin' and platform_machine == 'arm64'",
+}
+
 # Packages whose presence anywhere in the base install's transitive closure
 # would mean the merge went wrong. Each has a reason:
 #   numpy/nltk/absl-py/rouge-score — the `rouge-score` chain US-MERGE-06
@@ -100,10 +110,41 @@ def _requirement_name(spec: str) -> str:
     return _normalize(Requirement(spec).name)
 
 
+def _applicable_dependencies() -> list[str]:
+    """Declared dependencies whose environment marker holds on THIS box."""
+    from packaging.requirements import Requirement
+
+    out = []
+    for spec in _declared_dependencies():
+        req = Requirement(spec)
+        if req.marker is None or req.marker.evaluate({"extra": ""}):
+            out.append(spec)
+    return out
+
+
 class TestDependencyAudit:
     def test_base_dependencies_are_exactly_the_agreed_set(self):
-        declared = {_requirement_name(s) for s in _declared_dependencies()}
-        assert declared == {_normalize(n) for n in EXPECTED_BASE_DEPS}
+        """The seven, plus platform-marked backends that install nowhere else."""
+        unmarked = {
+            _requirement_name(s) for s in _declared_dependencies() if ";" not in s
+        }
+        assert unmarked == {_normalize(n) for n in EXPECTED_BASE_DEPS}
+
+    def test_every_platform_marked_dependency_keeps_its_marker(self):
+        """A marker dropped here silently widens EVERY install.
+
+        `zeus-apple-silicon` ships macOS-arm64 wheels only, so without the
+        marker a Linux install does not merely get heavier -- it fails to
+        resolve. The marker is load-bearing, not decorative.
+        """
+        marked = {}
+        for spec in _declared_dependencies():
+            if ";" not in spec:
+                continue
+            name, _, marker = spec.partition(";")
+            marked[_requirement_name(name)] = marker.strip()
+        expected = {_normalize(n): m for n, m in PLATFORM_MARKED_DEPS.items()}
+        assert marked == expected
 
     def test_every_base_dependency_is_pinned(self):
         """"The canonical pin list" in pyproject.toml's own words: a floating
@@ -143,7 +184,13 @@ class TestDependencyAudit:
         from packaging.requirements import Requirement
 
         seen: set[str] = set()
-        queue = [_requirement_name(s) for s in _declared_dependencies()]
+        # Seed with the dependencies that actually install ON THIS PLATFORM.
+        # A marked dep that does not apply here (zeus-apple-silicon off a Mac)
+        # is not part of this platform's closure, and treating it as missing
+        # would `pytest.skip` the whole audit -- silently switching off the
+        # forbidden-heavyweight check on every Linux box, which is where it
+        # runs most.
+        queue = [_requirement_name(s) for s in _applicable_dependencies()]
         while queue:
             name = queue.pop()
             if name in seen:

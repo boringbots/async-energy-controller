@@ -46,6 +46,20 @@ dependencies = [
     # (bench/tasks/ifeval_checks.py) need language detection; profiles are
     # bundled in the wheel so detect() needs no network call at score time.
     "langdetect==1.0.9",
+    # Apple Silicon energy, via IOReport (bench/apple_sampler.py). PLATFORM
+    # MARKED, so it resolves on an arm64 Mac and nowhere else -- a Linux or
+    # Windows install's dependency closure is byte-identical to before.
+    #
+    # A base dependency rather than an `[apple]` extra, for the same reason
+    # `nvidia-ml-py` is one: the program's stated goal is that a stranger
+    # installs ONE thing to measure their own machine. An extra would mean a
+    # Mac user's `pip install async-energy-controller` succeeds and then
+    # `bench quick` fails on a missing backend, which is the single-download
+    # promise broken at the worst moment.
+    #
+    # Cheap to carry: Apache-2.0, wheels for macOS 11+ arm64, and NO runtime
+    # dependencies of its own, so it adds exactly one node to the closure.
+    "zeus-apple-silicon==1.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # NOT a dependency, on purpose: `rouge-score`. US-MERGE-01 added it for
     # longctx_summary's ROUGE-L F1 scoring, and it drags absl-py, nltk, numpy
     # and six into the base install of a package whose whole point is one thin
