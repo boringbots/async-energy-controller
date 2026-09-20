@@ -39,7 +39,7 @@ class MMLUTask(Task):
     shape = "prefill"
     default_max_tokens = 512
     description = "57-subject multiple choice (long prompt, 1-token answer, prefill-heavy)"
-    stop = ["\n\n", "Question:"]
+    stop = ["\nQuestion:"]
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:
         test_rows = fetch_parquet_rows(REPO, TEST_FILE)

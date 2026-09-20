@@ -48,7 +48,7 @@ class HellaSwagTask(Task):
     shape = "prefill"
     default_max_tokens = 512
     description = "Saturated commonsense-completion canary (is_canary=True), letter-answer protocol"
-    stop = ["\n\n", "Sentence:"]
+    stop = ["\nSentence:"]
     is_canary = True
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:

@@ -97,11 +97,11 @@ class Math500Task(Task):
 
     name = "math500"
     shape = "decode"
-    default_max_tokens = 1024
+    default_max_tokens = 2048
     description = "Competition math problems (chain-of-thought, decode-heavy)"
     # Without these the model answers, then starts inventing its own
     # follow-up problem in the few-shot Problem/Solution pattern.
-    stop = ["Problem:", "\nProblem"]
+    stop = ["\nProblem:"]
     revision = REVISION
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:

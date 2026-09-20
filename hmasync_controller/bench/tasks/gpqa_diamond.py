@@ -83,7 +83,7 @@ class GPQADiamondTask(Task):
     shape = "prefill"
     default_max_tokens = 512
     description = "Graduate-level science QA, zero-shot, letter-answer (gated dataset)"
-    stop = ["\n\n", "Question:"]
+    stop = ["\nQuestion:"]
     revision = REVISION
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:

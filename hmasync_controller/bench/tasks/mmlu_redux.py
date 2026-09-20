@@ -133,7 +133,7 @@ class MMLUReduxTask(Task):
     description = (
         "Re-annotated MMLU (error_type == 'ok' rows only), same letter-answer protocol as mmlu"
     )
-    stop = ["\n\n", "Question:"]
+    stop = ["\nQuestion:"]
     revision = REVISION
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:

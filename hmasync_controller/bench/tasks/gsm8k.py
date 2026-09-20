@@ -37,11 +37,11 @@ class GSM8KTask(Task):
 
     name = "gsm8k"
     shape = "decode"
-    default_max_tokens = 400
+    default_max_tokens = 2048
     description = "Grade-school math word problems (chain-of-thought, decode-heavy)"
     # Without these the model answers, then invents its own follow-up questions
     # until max_tokens — measured at ~4x the necessary tokens on some items.
-    stop = ["Question:", "\nQuestion"]
+    stop = ["\nQuestion:"]
 
     def load(self, n_items: int, n_shot: int, seed: int) -> list[TaskItem]:
         test_rows = fetch_parquet_rows(REPO, TEST_FILE)
