@@ -1129,6 +1129,7 @@ def run_bench_quick(
     submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
     timeout_s: float | None = None,
+    thinking: bool = False,
 ) -> tuple[int, str]:
     """Run the ~25-minute onboarding suite in-process; write its artifacts
     and bundle (stamped `suite: "quick"`); hand off to `submit_fn` on
@@ -1144,6 +1145,7 @@ def run_bench_quick(
         run_quick_suite(
             restore_to_factory_default=_bench_restore_to_factory_default(settings),
             budget_s=timeout_s,
+            thinking=thinking,
         ),
         suite="quick",
         submit_fn=submit_fn,
@@ -1158,6 +1160,7 @@ def run_bench_calibrate(
     submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
     timeout_s: float | None = None,
+    thinking: bool = False,
 ) -> tuple[int, str]:
     """Run the ~3-5 minute slimmed calibrate probe in-process (US-MERGE-05);
     write its artifacts and bundle (stamped `suite: "calibrate"`, so a
@@ -1173,6 +1176,7 @@ def run_bench_calibrate(
         run_calibrate_suite(
             restore_to_factory_default=_bench_restore_to_factory_default(settings),
             budget_s=timeout_s,
+            thinking=thinking,
         ),
         suite="calibrate",
         submit_fn=submit_fn,
@@ -1198,6 +1202,19 @@ def _add_bench_timeout_arg(
             f"when the suite is being cut off before it finishes -- the item "
             f"counts are fixed, so a slower box needs a longer budget, not a "
             f"shorter run. Overrides BENCH_{suite.upper()}_TIMEOUT_S."
+        ),
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        default=None,
+        help=(
+            "Let the model think before answering. OFF by default: the axis "
+            "is pinned rather than left to the model, because defaults differ "
+            "within a model family and an unpinned suite measures two "
+            "different things. Thinking-on also needs a much larger "
+            "max_tokens and tasks that stop on a blank line to drop it first "
+            "-- see BENCH_THINKING. Overrides BENCH_THINKING."
         ),
     )
 
@@ -1436,6 +1453,9 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_s=_resolve_bench_timeout_s(
                     args.timeout, settings.BENCH_QUICK_TIMEOUT_S, BENCH_QUICK_TIMEOUT_S
                 ),
+                thinking=(
+                    settings.BENCH_THINKING if args.thinking is None else args.thinking
+                ),
             )
         elif bench_sub == "calibrate":
             code, message = run_bench_calibrate(
@@ -1445,6 +1465,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.timeout,
                     settings.BENCH_CALIBRATE_TIMEOUT_S,
                     BENCH_CALIBRATE_TIMEOUT_S,
+                ),
+                thinking=(
+                    settings.BENCH_THINKING if args.thinking is None else args.thinking
                 ),
             )
         elif bench_sub == "submit":

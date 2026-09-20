@@ -93,6 +93,22 @@ class Settings(BaseSettings):
     # than merely truncated.
     BENCH_QUICK_TIMEOUT_S: float | None = None
     BENCH_CALIBRATE_TIMEOUT_S: float | None = None
+    # Whether the benchmark lets the model think before answering.
+    #
+    # OFF by default, and deliberately pinned rather than left unset. An unset
+    # thinking kwarg lets the MODEL choose, and defaults differ within one
+    # model family, so an unpinned suite silently measures two different
+    # things and reports the difference as if it were hardware. Measured on
+    # the pinned reference model (a reasoning model): unpinned, its whole
+    # token budget goes to the reasoning channel, `content` comes back empty,
+    # and mmlu_redux scored 0.12 -- below the 0.25 floor of a 4-choice task.
+    #
+    # Thinking-on is a legitimate axis to measure, not a mistake, but it is a
+    # different axis: it needs far bigger `max_tokens` (~1500/item on gsm8k
+    # against the 400 pinned here) and tasks stopping on "\n\n" must drop it
+    # first, or generation dies at the reasoning trace's first paragraph
+    # break. Turn it on deliberately, with those two things handled.
+    BENCH_THINKING: bool = False
 
     # --- power-curve cap (opt-in; a separate consent from BENCH_OPTIN) ---
     # Off by default. When true AND this box has an NVML-backed GPU, the

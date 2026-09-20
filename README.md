@@ -510,6 +510,35 @@ in rather than at the backstop.
 Raise the budget rather than looking for a way to shorten the suite: the fixed
 item counts are the whole basis of comparability.
 
+### Thinking is off, and pinned
+
+The suite pins the thinking axis rather than leaving it to the model, and
+pins it **off** by default. This is not a stylistic choice:
+
+- An unset thinking kwarg lets the *model* decide, and defaults differ within
+  a single model family — so an unpinned suite silently measures two different
+  things and reports the difference as if it were hardware.
+- The pinned reference model is a reasoning model. Unpinned, its whole token
+  budget goes to the reasoning channel, `content` comes back empty, and
+  `mmlu_redux` scores **0.12** — below the 0.25 floor of a 4-choice task.
+  Pinned off, the same items score **0.83** on 2 tokens each instead of 18.
+
+Every run records what it used in `thinking_mode` (`enable_thinking=false` or
+`enable_thinking=true`), so a row always states which axis it measured and
+two axes never pool.
+
+Thinking-on is a legitimate thing to measure, just a different measurement:
+
+```bash
+async-energy-controller bench quick --thinking     # or BENCH_THINKING=true
+```
+
+Before trusting a thinking-on run, note that it needs a much larger
+`max_tokens` (~1500/item on gsm8k against the 400 pinned here), and that the
+tasks stopping on a blank line — `mmlu`, `mmlu_redux`, `gpqa_diamond`,
+`hellaswag` — must drop that stop first, or generation dies at the reasoning
+trace's first paragraph break.
+
 ### A faster option — `bench calibrate`
 
 ```bash

@@ -138,6 +138,10 @@ __all__ = [
     "QUICK_REFERENCE_N_SHOT",
     "QUICK_REFERENCE_SEED",
     "QUICK_TASKS",
+    "THINKING_MODE_OFF",
+    "THINKING_MODE_ON",
+    "THINKING_OFF_CHAT_TEMPLATE_KWARGS",
+    "THINKING_ON_CHAT_TEMPLATE_KWARGS",
     "QuickError",
     "QuickModel",
     "QuickSuiteResult",
@@ -360,6 +364,10 @@ class QuickTaskRun:
     seed: int
     max_tokens: int
     power_limit_w: int | None
+    # Which thinking axis this run pinned, e.g. "enable_thinking=false".
+    # None means nobody pinned it and the model chose -- see
+    # THINKING_OFF_CHAT_TEMPLATE_KWARGS for why that is a defect, not a default.
+    thinking_mode: str | None = None
     inference_results: list[InferenceResult] = field(default_factory=list)
     telemetry_samples: list[TelemetrySample] = field(default_factory=list)
     streaming_used: bool = True
@@ -377,6 +385,7 @@ async def run_quick_task(
     power_limit_w: int | None = None,
     n_shot: int | None = None,
     seed: int | None = None,
+    thinking: bool = False,
 ) -> QuickTaskRun:
     """Load a task, sample telemetry across it, score every item.
 
@@ -393,6 +402,10 @@ async def run_quick_task(
 
     task = load_task(task_name)
     max_tokens = task.default_max_tokens
+    # Pinned, never left to the model: see THINKING_OFF_CHAT_TEMPLATE_KWARGS.
+    chat_template_kwargs = dict(
+        THINKING_ON_CHAT_TEMPLATE_KWARGS if thinking else THINKING_OFF_CHAT_TEMPLATE_KWARGS
+    )
     items = task.load(n_items=n_items, n_shot=resolved_n_shot, seed=resolved_seed)
 
     run_id = f"quick-{task_name}-{power_limit_w or 'stock'}-{int(time.time() * 1000)}"
@@ -410,6 +423,7 @@ async def run_quick_task(
                     stop=task.stop,
                     temperature=0.0,
                     stream=True,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
             except (VLLMUnavailableError, VLLMTimeoutError):
                 streaming_used = False
@@ -420,6 +434,7 @@ async def run_quick_task(
                     stop=task.stop,
                     temperature=0.0,
                     stream=False,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
             result.item_id = item.item_id
             result.correct = task.score(text, item)
@@ -444,6 +459,7 @@ async def run_quick_task(
         n_shot=resolved_n_shot,
         seed=resolved_seed,
         max_tokens=max_tokens,
+        thinking_mode=THINKING_MODE_ON if thinking else THINKING_MODE_OFF,
         power_limit_w=power_limit_w,
         inference_results=inference_results,
         telemetry_samples=telemetry_samples,
@@ -689,6 +705,7 @@ def _build_run_metrics(
             power_limit_w=task_run.power_limit_w,
             temperature=0.0,
             max_tokens=task_run.max_tokens,
+            thinking_mode=task_run.thinking_mode,
             seed=task_run.seed,
             n_shot=task_run.n_shot,
             dataset_revision=task_run.dataset_revision,
@@ -698,6 +715,42 @@ def _build_run_metrics(
         logger.warning("bench quick: failed to compute metrics for %s: %s", label, e)
         return None
 
+
+THINKING_OFF_CHAT_TEMPLATE_KWARGS: dict[str, object] = {
+    "enable_thinking": False,
+    "reasoning_effort": "none",
+}
+"""What "thinking off" is on the wire, pinned rather than left unset.
+
+Both keys are needed because the two servers read different ones, and
+`VLLMClient.chat` already lifts `reasoning_effort` to the top level for the
+renderers that only look there:
+
+- vLLM's Jinja templates read `chat_template_kwargs.enable_thinking`.
+- Ollama's OpenAI-compatible endpoint ignores that (and ignores a top-level
+  `think`); `reasoning_effort` is the only one of the three it honours --
+  verified against Ollama 0.34.2 on qwen3.5:9b-q4_K_M, where the other two
+  still came back with an empty `content` and a full reasoning channel.
+
+Sending a key a server does not recognise is inert, so one dict covers both.
+"""
+
+THINKING_ON_CHAT_TEMPLATE_KWARGS: dict[str, object] = {"enable_thinking": True}
+"""What "thinking on" is on the wire. Pinned for the same reason the off
+variant is: the point is never to let the model decide the axis. No
+`reasoning_effort` here -- both servers already think by default, so the key
+is only needed to turn it OFF."""
+
+THINKING_MODE_OFF = "enable_thinking=false"
+"""`RunMetrics.thinking_mode` for a pinned thinking-off run.
+
+Same `key=value` serialization energy-bench's `_serialize_thinking_mode`
+writes, so a controller row and a lab row group together instead of forming
+two spellings of one configuration. None (the field left unset) means nobody
+pinned the axis, which is the state these constants exist to end."""
+
+THINKING_MODE_ON = "enable_thinking=true"
+"""`RunMetrics.thinking_mode` for a pinned thinking-on run."""
 
 TRUNCATION_WARN_FRACTION = 0.2
 """Warn once a task's truncated share reaches this. Some truncation is
@@ -786,6 +839,7 @@ async def _run_bench_suite(
     label_prefix_stem: str,
     restore_to_factory_default: bool = True,
     budget_s: float | None = None,
+    thinking: bool = False,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -890,7 +944,12 @@ async def _run_bench_suite(
             logger.info("[%d/%d] %s (n=%d)...", i, len(tasks), task_name, n_items)
             try:
                 task_run = await run_quick_task(
-                    vllm_client, telemetry, model.name, task_name, n_items
+                    vllm_client,
+                    telemetry,
+                    model.name,
+                    task_name,
+                    n_items,
+                    thinking=thinking,
                 )
             except Exception as e:  # noqa: BLE001 - one failed task must not sink the suite
                 logger.warning("  %s failed: %s", task_name, e)
@@ -1021,6 +1080,7 @@ async def run_quick_suite(
     target_host: str | None = None,
     restore_to_factory_default: bool = True,
     budget_s: float | None = None,
+    thinking: bool = False,
 ) -> QuickSuiteResult:
     """Run the ~25-minute onboarding suite end to end, in-process: the full
     `QUICK_TASKS` set plus the mini power sweep's full derived ladder. The
@@ -1042,6 +1102,7 @@ async def run_quick_suite(
         label_prefix_stem="quick",
         restore_to_factory_default=restore_to_factory_default,
         budget_s=budget_s,
+        thinking=thinking,
     )
 
 
@@ -1069,6 +1130,7 @@ async def run_calibrate_suite(
     target_host: str | None = None,
     restore_to_factory_default: bool = True,
     budget_s: float | None = None,
+    thinking: bool = False,
 ) -> QuickSuiteResult:
     """Run the ~3-5 minute slimmed scheduling probe (US-MERGE-05): one
     decode task (`CALIBRATE_TASKS`, ~15 items) plus the mini power sweep's
@@ -1095,4 +1157,5 @@ async def run_calibrate_suite(
         label_prefix_stem="calibrate",
         restore_to_factory_default=restore_to_factory_default,
         budget_s=budget_s,
+        thinking=thinking,
     )

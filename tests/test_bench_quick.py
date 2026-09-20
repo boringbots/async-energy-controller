@@ -25,6 +25,8 @@ from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLA
 from hmasync_controller.bench.metrics import THROTTLE_HW_THERMAL
 from hmasync_controller.bench.metrics.models import InferenceResult
 from hmasync_controller.bench.quick import (
+    THINKING_MODE_OFF,
+    THINKING_MODE_ON,
     CALIBRATE_MAX_SWEEP_POINTS,
     CALIBRATE_TASK_N_ITEMS,
     CALIBRATE_TASKS,
@@ -764,11 +766,14 @@ def _suite_telemetry(*, stock_w=None, min_w=None, max_w=None, default_w=_UNSET):
     return telemetry
 
 
-def _fake_task_run(task_name: str, n_items: int, *, power_limit_w=None, n_shot=None, seed=None) -> QuickTaskRun:
+def _fake_task_run(
+    task_name: str, n_items: int, *, power_limit_w=None, n_shot=None, seed=None, thinking=False
+) -> QuickTaskRun:
     return QuickTaskRun(
         task_name=task_name, task_shape="decode", is_canary=False, dataset_revision=None,
         n_items=n_items, n_shot=n_shot or QUICK_REFERENCE_N_SHOT, seed=seed or QUICK_REFERENCE_SEED,
         max_tokens=64, power_limit_w=power_limit_w,
+        thinking_mode=THINKING_MODE_ON if thinking else THINKING_MODE_OFF,
         inference_results=[_inference_result()],
         telemetry_samples=_samples(2),
         streaming_used=True,

@@ -1352,7 +1352,7 @@ def test_main_dispatches_bench_quick(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "run_bench_quick",
-        lambda settings, submit_fn=None, timeout_s=None: (0, "bundle written to x.json"),
+        lambda settings, submit_fn=None, timeout_s=None, thinking=None: (0, "bundle written to x.json"),
     )
 
     assert cli.main(["bench", "quick"]) == 0
@@ -1365,7 +1365,7 @@ def test_main_wires_bench_submit_fn_into_bench_quick(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
     seen = {}
 
-    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None, thinking=None):
         seen["submit_fn"] = submit_fn
         seen["timeout_s"] = timeout_s
         return 0, "bundle written to x.json"
@@ -1445,7 +1445,7 @@ def test_main_dispatches_bench_calibrate(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "run_bench_calibrate",
-        lambda settings, submit_fn=None, timeout_s=None: (0, "bundle written to x.json"),
+        lambda settings, submit_fn=None, timeout_s=None, thinking=None: (0, "bundle written to x.json"),
     )
 
     assert cli.main(["bench", "calibrate"]) == 0
@@ -1734,7 +1734,7 @@ def test_main_passes_the_timeout_flag_through_to_the_suite(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
     seen = {}
 
-    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None, thinking=None):
         seen["timeout_s"] = timeout_s
         return 0, "bundle written to x.json"
 
@@ -1749,7 +1749,7 @@ def test_main_falls_back_to_this_boxs_default_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "is_apple_silicon", lambda: True)
     seen = {}
 
-    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None, thinking=None):
         seen["timeout_s"] = timeout_s
         return 0, "bundle written to x.json"
 
@@ -1803,3 +1803,67 @@ def test_no_truncation_warning_when_answers_finished(caplog):
         # A little truncation is normal on a verbose model; stay quiet.
         quick_mod._warn_if_answers_were_truncated(_truncated_task_run(1))
     assert caplog.text == ""
+
+
+# --- the thinking axis is pinned, never left to the model ---
+#
+# energy-bench METHODOLOGY: "An unset thinking kwarg lets the model choose,
+# and defaults differ within one family." Measured here on the pinned
+# reference model: unpinned, mmlu_redux scored 0.12 -- below the 0.25 floor of
+# a 4-choice task -- because the whole budget went to the reasoning channel.
+
+
+def test_thinking_is_off_by_default_and_pinned_both_ways():
+    from hmasync_controller.bench import quick as q
+
+    assert q.THINKING_OFF_CHAT_TEMPLATE_KWARGS["enable_thinking"] is False
+    # Ollama's OpenAI endpoint honours ONLY reasoning_effort; vLLM's Jinja
+    # templates read enable_thinking. Both keys or one server is unpinned.
+    assert q.THINKING_OFF_CHAT_TEMPLATE_KWARGS["reasoning_effort"] == "none"
+    assert q.THINKING_ON_CHAT_TEMPLATE_KWARGS["enable_thinking"] is True
+    # Serialization matches energy-bench's _serialize_thinking_mode so a
+    # controller row and a lab row group together.
+    assert q.THINKING_MODE_OFF == "enable_thinking=false"
+    assert q.THINKING_MODE_ON == "enable_thinking=true"
+
+
+def test_bench_defaults_to_thinking_off():
+    assert Settings().BENCH_THINKING is False
+    assert cli._parse_args(["bench", "quick"]).thinking is None
+    assert cli._parse_args(["bench", "quick", "--thinking"]).thinking is True
+    assert cli._parse_args(["bench", "calibrate", "--thinking"]).thinking is True
+
+
+def test_main_passes_thinking_through_to_the_suite(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    seen = {}
+
+    def fake(settings, submit_fn=None, timeout_s=None, thinking=None):
+        seen["thinking"] = thinking
+        return 0, "bundle written to x.json"
+
+    monkeypatch.setattr(cli, "run_bench_quick", fake)
+
+    assert cli.main(["bench", "quick"]) == 0
+    assert seen["thinking"] is False, "default must be thinking OFF"
+
+    assert cli.main(["bench", "quick", "--thinking"]) == 0
+    assert seen["thinking"] is True
+
+
+def test_the_flag_beats_the_setting(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    s = _settings(tmp_path)
+    s.BENCH_THINKING = True
+    monkeypatch.setattr(cli, "Settings", lambda: s)
+    seen = {}
+
+    def fake(settings, submit_fn=None, timeout_s=None, thinking=None):
+        seen["thinking"] = thinking
+        return 0, "ok"
+
+    monkeypatch.setattr(cli, "run_bench_quick", fake)
+    # Setting says on, and with no flag that is what runs.
+    assert cli.main(["bench", "quick"]) == 0
+    assert seen["thinking"] is True
