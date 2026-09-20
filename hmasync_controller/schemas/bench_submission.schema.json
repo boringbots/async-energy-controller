@@ -211,6 +211,24 @@
             "null"
           ]
         },
+        "gguf_repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gguf_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weights_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "model": {
           "type": "string"
         },

@@ -312,9 +312,40 @@ class QuickModel:
     the actually-loaded GGUF's quant is unknown from an attach-mode HTTP
     surface alone."""
 
+    record_gguf_repo: str | None = None
+    """`RunMetrics.gguf_repo` -- the HF repo the served GGUF came from. Set
+    only when a caller pinned it (`bench reference`); None otherwise."""
+
+    record_gguf_revision: str | None = None
+    """`RunMetrics.gguf_revision` -- the commit of `record_gguf_repo`."""
+
+    record_weights_digest: str | None = None
+    """`RunMetrics.weights_digest` -- Ollama's manifest digest for the tag
+    actually pulled on this box, read live from `/api/tags`. This is what
+    makes `record_quantization` mean something: 'Q4_K_M' names a scheme,
+    the digest names the weights. None when Ollama did not report one."""
+
+
+async def _ollama_weights_digest(adapter: object, tag: str) -> str | None:
+    """Best-effort digest lookup; None on any failure, never an exception --
+    provenance must not block a run the pulled-check already admitted."""
+    lookup = getattr(adapter, "model_digest", None)
+    if lookup is None:
+        return None
+    try:
+        digest = await lookup(tag)
+    except Exception as e:  # noqa: BLE001 -- best-effort by design
+        logger.warning("bench: could not read the weights digest for %s: %s", tag, e)
+        return None
+    return digest if isinstance(digest, str) and digest else None
+
 
 async def resolve_quick_model(
-    engine: DetectedEngine, entry: "RosterEntry | None" = None
+    engine: DetectedEngine,
+    entry: "RosterEntry | None" = None,
+    *,
+    gguf_repo: str | None = None,
+    gguf_revision: str | None = None,
 ) -> QuickModel:
     """Resolve + verify the model this run will measure. Never pulls.
 
@@ -332,6 +363,15 @@ async def resolve_quick_model(
         except OllamaModelNotPulledError as e:
             raise ModelNotAvailableError(str(e)) from e
         note = f"ollama:{tag}" + (f" (family={family})" if family else "")
+        digest = await _ollama_weights_digest(engine.adapter, tag)
+        if entry is not None and digest is not None and digest != entry.digest:
+            # Recorded as measured, not as pinned: the row carries the digest
+            # that actually ran, and the server can tell it apart from the
+            # roster's weights. Never silently pooled.
+            logger.warning(
+                "bench: %s resolved to digest %s, roster pins %s -- recording what ran",
+                tag, digest, entry.digest,
+            )
         return QuickModel(
             name=tag,
             note=note,
@@ -339,6 +379,7 @@ async def resolve_quick_model(
             record_quantization=(
                 entry.quantization if entry else QUICK_REFERENCE_MODELS["ollama"]["quantization"]
             ),
+            record_weights_digest=digest,
         )
 
     # llama.cpp: attach-only, no swap-by-request API -- measure whatever is
@@ -364,6 +405,10 @@ async def resolve_quick_model(
         note=f"llama.cpp: whatever was already loaded ({served})",
         record_model=served,
         record_quantization=None,
+        # Only a caller that verified the served file against a pin
+        # (`bench reference`) passes these; plain `bench quick` records None.
+        record_gguf_repo=gguf_repo,
+        record_gguf_revision=gguf_revision,
     )
 
 
@@ -727,6 +772,9 @@ def _build_run_metrics(
             n_shot=task_run.n_shot,
             dataset_revision=task_run.dataset_revision,
             streaming_used=task_run.streaming_used,
+            gguf_repo=model.record_gguf_repo,
+            gguf_revision=model.record_gguf_revision,
+            weights_digest=model.record_weights_digest,
         )
     except MetricsComputeError as e:
         logger.warning("bench quick: failed to compute metrics for %s: %s", label, e)
@@ -858,6 +906,8 @@ async def _run_bench_suite(
     budget_s: float | None = None,
     thinking: bool = False,
     entry: "RosterEntry | None" = None,
+    gguf_repo: str | None = None,
+    gguf_revision: str | None = None,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -916,7 +966,9 @@ async def _run_bench_suite(
         )
     logger.info("  engine: %s at %s", detected.name, detected.base_url)
 
-    model = await resolve_quick_model(detected, entry)
+    model = await resolve_quick_model(
+        detected, entry, gguf_repo=gguf_repo, gguf_revision=gguf_revision
+    )
     logger.info("  model: %s", model.note)
 
     telemetry = select_gpu_sampler()

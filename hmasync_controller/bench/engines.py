@@ -151,6 +151,26 @@ class OllamaAdapter:
             )
         return {m["name"] for m in response.json().get("models", []) if m.get("name")}
 
+    async def model_digest(self, model: str) -> str | None:
+        """The manifest digest of a pulled tag, from `GET /api/tags` -- the
+        weights identity for an Ollama-served model (`RunMetrics.
+        weights_digest`). None when the tag is not listed or the field is
+        absent; never raises, because provenance is recorded best-effort and
+        must not block a run that `verify_model_pulled` already admitted.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{self._base_url}/api/tags")
+        except (httpx.TimeoutException, httpx.RequestError):
+            return None
+        if response.status_code != 200:
+            return None
+        for entry in response.json().get("models", []):
+            if entry.get("name") == model or entry.get("model") == model:
+                digest = entry.get("digest")
+                return str(digest) if digest else None
+        return None
+
     async def verify_model_pulled(self, model: str) -> str | None:
         """Pre-flight gate: confirm `model` is already pulled via `POST /api/show`.
 

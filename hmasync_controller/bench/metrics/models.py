@@ -157,6 +157,14 @@ class RunMetrics:
     n_shot: int | None = None
     thinking_mode: str | None = None
     dataset_revision: str | None = None
+    # --- Weights identity ----------------------------------------------------
+    # A quantization NAME is not a set of weights: two community Q4_K_M builds
+    # of one base model measure differently (energy-bench grading/reference.py,
+    # the fix in f3e6f01). These say WHOSE weights ran. All three are None when
+    # the run could not establish it -- never a plausible guess.
+    gguf_repo: str | None = None
+    gguf_revision: str | None = None
+    weights_digest: str | None = None
 
     # --- Energy -----------------------------------------------------------
     total_joules_cpu: float | None = None

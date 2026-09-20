@@ -217,6 +217,12 @@ async def run_reference_suite(
         # has, so leaving it unset left the anchor undefined where it mattered
         # most.
         thinking=False,
+        # `_served_model_matches` above confirmed the served file is the
+        # pinned GGUF by name; these record which repo/revision that pin is,
+        # so the row says WHOSE Q4_K_M ran (the f3e6f01 class of bug, closed
+        # on the submission side).
+        gguf_repo=QUICK_REFERENCE_MODELS["llama.cpp"]["gguf_repo"],
+        gguf_revision=QUICK_REFERENCE_MODELS["llama.cpp"]["revision"],
     )
 
 

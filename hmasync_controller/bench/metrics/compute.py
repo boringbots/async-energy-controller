@@ -310,6 +310,9 @@ def compute_metrics(
     thinking_mode: str | None = None,
     dataset_revision: str | None = None,
     streaming_used: bool = False,
+    gguf_repo: str | None = None,
+    gguf_revision: str | None = None,
+    weights_digest: str | None = None,
 ) -> RunMetrics:
     """Compute derived energy metrics from raw telemetry and inference results.
 
@@ -477,6 +480,9 @@ def compute_metrics(
         n_shot=n_shot,
         thinking_mode=thinking_mode,
         dataset_revision=dataset_revision,
+        gguf_repo=gguf_repo,
+        gguf_revision=gguf_revision,
+        weights_digest=weights_digest,
         joules_per_token=joules_per_token,
         total_joules_gpu=total_joules_gpu,
         total_joules_cpu=total_joules_cpu,
