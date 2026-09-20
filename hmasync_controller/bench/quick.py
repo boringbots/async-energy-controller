@@ -673,6 +673,10 @@ def _build_run_metrics(
             ambient_c_start=None,
             rapl_max_energy_range_uj=task_run.rapl_max_energy_range_uj,
             rapl_dram_max_energy_range_uj=task_run.rapl_dram_max_energy_range_uj,
+            # Which counter measured this, by name. Without it every run
+            # reads 'counter' and a Mac row pools silently with an NVIDIA
+            # one -- the exact thing `energy_source` exists to prevent.
+            counter_source=gpu_info.get("energy_source", "counter"),
             task=task_run.task_name,
             task_shape=task_run.task_shape,
             is_canary=task_run.is_canary,

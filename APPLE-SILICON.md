@@ -5,13 +5,31 @@ graphics card.
 
 ```bash
 pip install async-energy-controller
-ollama serve &            # or llama-server, if you prefer
-ollama pull qwen3:8b
+ollama serve &                      # or llama-server, if you prefer
+ollama pull qwen3.5:9b-q4_K_M       # the fixed reference model, ~6 GB
 async-energy-controller bench quick
 ```
 
 That is the whole setup. The energy backend comes with the package on an
 arm64 Mac and nowhere else, so there is still exactly one thing to install.
+
+### How much memory you need
+
+The reference model is fixed across every submission -- that is what makes
+them comparable -- and it is a **Q4_K_M quantization of a 9B**, so budget
+roughly 6 GB for weights plus whatever the KV cache grows to.
+
+**16 GB or more is comfortable. On an 8 GB Mac, expect the machine to swap.**
+That matters more here than it would elsewhere: swapping inflates both
+wall-clock and energy, and the harness has no way to notice it, so the run
+will look valid and simply read high. If you only have 8 GB, a number from
+your machine is not wrong so much as unattributable -- it is measuring
+macOS's memory pressure as much as the model.
+
+The reference model is deliberately NOT swapped for a smaller one on
+low-memory machines. A suite that measures a different model on different
+hardware produces rows that cannot be compared, which defeats the point of
+having a reference at all.
 
 ---
 
@@ -89,8 +107,9 @@ only reads counters and sends HTTP requests to a server you started. See
 
 ## How it works
 
-[IOReport](https://developer.apple.com/documentation/) is the interface
-`powermetrics` itself reads. We use it through
+IOReport is the interface `powermetrics` itself reads. It is a private
+Apple framework with no published documentation, which is part of why we do
+not bind to it directly. We use it through
 [`zeus-apple-silicon`](https://github.com/ml-energy/zeus-apple-silicon)
 (Apache-2.0, from the ml-energy group), not by hand-rolling `ctypes` bindings
 into a private Apple framework.

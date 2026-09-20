@@ -32,6 +32,7 @@ from hmasync_controller.bench.metrics.compute import (
     compute_cpu_dram_energy,
     compute_cpu_energy,
 )
+from hmasync_controller.bench.metrics.compute import InferenceResult
 from hmasync_controller.bench.sampler import GpuSampler, select_gpu_sampler
 
 
@@ -119,6 +120,109 @@ class TestPlatformGate:
         assert AppleSiliconSampler().energy_source == "ioreport"
         assert LocalNvmlSampler().energy_source == "counter"
         assert AppleSiliconSampler().energy_source != LocalNvmlSampler().energy_source
+
+
+class TestEnergySourceReachesTheRun:
+    """The attribute existing is not the same as the row carrying it.
+
+    Caught 2026-09-19 after the first commit: `compute_metrics` hardcoded
+    `"counter" if counter_joules is not None else "integrated"`, so a Mac run
+    would have been stamped `counter` and pooled straight into the NVIDIA
+    population. The sampler's `energy_source` was correct and reached
+    nothing. Tests that only assert the attribute cannot see that, so these
+    assert the END of the chain.
+    """
+
+    def _metrics(self, counter_source: str):
+        import time
+
+        from hmasync_controller.bench.metrics.compute import compute_metrics
+        from hmasync_controller.bench.sampler import TelemetrySample
+
+        t0 = time.time()
+        samples = [
+            TelemetrySample(
+                ts=t0 + i * 0.2,
+                gpu_power_w=50.0,
+                gpu_util_pct=None,
+                gpu_mem_used_mib=None,
+                gpu_temp_c=None,
+                gpu_energy_mj=1000.0 * (i + 1),
+            )
+            for i in range(5)
+        ]
+        results = [
+            InferenceResult(
+                request_id="r0",
+                prompt_tokens=10,
+                completion_tokens=20,
+                ttft_s=0.1,
+                total_s=1.0,
+                tokens_per_second=20.0,
+                t_start_s=t0,
+                t_end_s=t0 + 0.8,
+            )
+        ]
+        return compute_metrics(
+            run_id="r",
+            label="l",
+            model="m",
+            quantization=None,
+            target_host="localhost",
+            samples=samples,
+            inference_results=results,
+            kwh_before=None,
+            kwh_after=None,
+            ambient_c_start=None,
+            counter_source=counter_source,
+        )
+
+    def test_ioreport_survives_into_the_row(self):
+        assert self._metrics("ioreport").energy_source == "ioreport"
+
+    def test_nvidia_callers_are_unchanged_by_default(self):
+        assert self._metrics("counter").energy_source == "counter"
+
+    def test_quick_passes_the_source_it_read_from_gpu_info(self):
+        """The link in the middle of the chain.
+
+        `gpu_info()` reports it and `compute_metrics` accepts it; this is the
+        one line that actually joins them, and losing it would put every run
+        back to a hardcoded 'counter' with no test failing.
+        """
+        import inspect
+
+        from hmasync_controller.bench import quick
+
+        src = inspect.getsource(quick)
+        assert 'counter_source=gpu_info.get("energy_source"' in src
+
+    def test_a_mac_shaped_sample_does_not_crash_the_health_rollup(self):
+        """Every GPU channel but power is None on Apple Silicon.
+
+        `compute_hardware_health` promised in its docstring to degrade rather
+        than raise, and did not: temperature, VRAM and utilization went
+        straight into `max()`/`sum()`. NVML always answers those three, so it
+        took a Mac to find it -- `bench quick` completed the run and then
+        died computing its metrics.
+        """
+        from hmasync_controller.bench.metrics.compute import compute_hardware_health
+
+        monitor = FakeMonitor()
+        sampler = _wired(AppleSiliconSampler(), monitor)
+        samples = [sampler.sample() for _ in range(3)]
+
+        health = compute_hardware_health(samples, gpu_mem_total_mib=None)
+        for field in (
+            "peak_gpu_temp_c",
+            "mean_gpu_temp_c",
+            "peak_gpu_mem_used_mib",
+            "mean_gpu_mem_used_mib",
+            "gpu_mem_used_pct_of_total",
+            "mean_gpu_util_pct",
+            "thermal_throttle_pct",
+        ):
+            assert health[field] is None, f"{field} should be withheld, got {health[field]}"
 
 
 class TestCounterArithmetic:

@@ -259,6 +259,10 @@ class LocalNvmlSampler:
             "cuda_version": _try_nvml(
                 lambda: _format_cuda_version(pynvml.nvmlSystemGetCudaDriverVersion())
             ),
+            # Names the counter for `compute_metrics(counter_source=...)`.
+            # Stated here rather than defaulted downstream so that neither
+            # sampler is the implicit one.
+            "energy_source": self.energy_source,
         }
 
     async def get_power_limit_w(self) -> int | None:

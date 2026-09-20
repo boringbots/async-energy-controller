@@ -44,24 +44,38 @@ def compute_hardware_health(
     Covers thermals, VRAM, utilization, clocks, and throttle validity. Every
     field degrades to None rather than raising when a channel wasn't
     reported, so a sample from an older/limited driver still loads.
+
+    THAT PROMISE WAS ONLY HALF TRUE until 2026-09-19. Temperature, VRAM and
+    utilization were read straight off every sample, so an all-None channel
+    reached `max()`/`sum()` and raised `TypeError` instead of degrading. It
+    never fired because NVML always answers those three -- and then Apple
+    Silicon arrived, where temperature and utilization are unavailable
+    unprivileged and VRAM does not exist at all (memory is unified), which
+    made `bench quick` crash on a Mac after a perfectly good run. Each of the
+    three now filters first, like the clock and fan channels below always
+    did.
     """
     out: dict[str, float | None] = {}
     if not samples:
         return out
 
-    temps = [s.gpu_temp_c for s in samples]
-    out["peak_gpu_temp_c"] = max(temps)
-    out["mean_gpu_temp_c"] = sum(temps) / len(temps)
+    temps = [s.gpu_temp_c for s in samples if s.gpu_temp_c is not None]
+    out["peak_gpu_temp_c"] = max(temps) if temps else None
+    out["mean_gpu_temp_c"] = _mean_of(temps)
 
-    mem = [s.gpu_mem_used_mib for s in samples]
-    peak_mem = max(mem)
+    mem = [s.gpu_mem_used_mib for s in samples if s.gpu_mem_used_mib is not None]
+    peak_mem = max(mem) if mem else None
     out["peak_gpu_mem_used_mib"] = peak_mem
-    out["mean_gpu_mem_used_mib"] = sum(mem) / len(mem)
+    out["mean_gpu_mem_used_mib"] = _mean_of(mem)
     out["gpu_mem_used_pct_of_total"] = (
-        100.0 * peak_mem / gpu_mem_total_mib if gpu_mem_total_mib else None
+        100.0 * peak_mem / gpu_mem_total_mib
+        if peak_mem is not None and gpu_mem_total_mib
+        else None
     )
 
-    out["mean_gpu_util_pct"] = _mean_of([s.gpu_util_pct for s in samples])
+    out["mean_gpu_util_pct"] = _mean_of(
+        [s.gpu_util_pct for s in samples if s.gpu_util_pct is not None]
+    )
     out["mean_gpu_mem_util_pct"] = _mean_of(
         [s.gpu_mem_util_pct for s in samples if s.gpu_mem_util_pct is not None]
     )
@@ -275,6 +289,7 @@ def compute_metrics(
     wall_samples: list[WallPowerSample] | None = None,
     rapl_max_energy_range_uj: float | None = None,
     rapl_dram_max_energy_range_uj: float | None = None,
+    counter_source: str = "counter",
     task: str | None = None,
     task_shape: str | None = None,
     is_canary: bool = False,
@@ -340,13 +355,21 @@ def compute_metrics(
     total_joules_cpu = compute_cpu_energy(samples, rapl_max_energy_range_uj)
     total_joules_cpu_dram = compute_cpu_dram_energy(samples, rapl_dram_max_energy_range_uj)
 
-    # Prefer NVML's hardware energy counter over integrating 5 Hz power
-    # samples. Every per-unit metric below derives from `joules_best`, and
+    # Prefer a hardware energy counter over integrating 5 Hz power samples.
+    # Every per-unit metric below derives from `joules_best`, and
     # `energy_source` records which it was.
+    #
+    # `counter_source` NAMES the counter, because not every counter is NVML's.
+    # Apple Silicon passes 'ioreport' (bench.apple_sampler), and that
+    # distinction has to survive into the row: two vendors' estimates of
+    # their own silicon are two instruments, not one, and anything pooling
+    # joules needs to be able to see that without knowing which box produced
+    # the row. Defaulting to 'counter' keeps every existing NVIDIA caller
+    # byte-identical.
     counter = compute_counter_energy(samples, total_joules_gpu)
     counter_joules = counter["total_joules_gpu_counter"]
     joules_best = counter_joules if counter_joules is not None else total_joules_gpu
-    energy_source = "counter" if counter_joules is not None else "integrated"
+    energy_source = counter_source if counter_joules is not None else "integrated"
 
     joules_per_token = joules_best / total_completion_tokens
 
