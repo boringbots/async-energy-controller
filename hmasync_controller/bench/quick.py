@@ -165,9 +165,17 @@ QUICK_REFERENCE_MODELS: dict[str, dict[str, str]] = {
         "quantization": "Q4_K_M",
     },
     "llama.cpp": {
-        "gguf_repo": "unsloth/Qwen3.5-9B-GGUF",
+        # energy-bench's REFERENCE_CONFIG pins THIS repo, and its comment names
+        # unsloth @ 3885219b (what this file used to point at) as the runner-up
+        # it deliberately passed over: that repo ships its own calibrated
+        # scheme, and "a reference wants the plainest conversion available".
+        # A quantization NAME is not a set of weights -- two community Q4_K_M
+        # builds of the same base model measure differently -- so pointing at
+        # the runner-up while recording `quantization: Q4_K_M` is exactly the
+        # silent normalization the lab added these keys to prevent.
+        "gguf_repo": "lmstudio-community/Qwen3.5-9B-GGUF",
         "gguf_file": "Qwen3.5-9B-Q4_K_M.gguf",
-        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "revision": "1379f25c6b505a3fc737bd7818cb09389cf807c1",
     },
 }
 

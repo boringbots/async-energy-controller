@@ -709,10 +709,19 @@ class TestRunPowerSweepMaxPoints:
 
 
 class TestQuickModelResolution:
-    def test_llamacpp_gguf_spec_matches_verified_repo(self):
+    def test_llamacpp_gguf_spec_matches_the_lab_reference(self):
+        """These are the exact weights energy-bench's REFERENCE_CONFIG pins.
+
+        Not interchangeable with another community Q4_K_M of the same base
+        model: the lab's own comment names unsloth @ 3885219b as the runner-up
+        it passed over, and a row recording `quantization: Q4_K_M` while
+        serving different weights normalizes silently against the wrong thing.
+        Verified live 2026-09-20: repo 200, revision resolves, file present.
+        """
         spec = QUICK_REFERENCE_MODELS["llama.cpp"]
-        assert spec["gguf_repo"] == "unsloth/Qwen3.5-9B-GGUF"
+        assert spec["gguf_repo"] == "lmstudio-community/Qwen3.5-9B-GGUF"
         assert spec["gguf_file"] == "Qwen3.5-9B-Q4_K_M.gguf"
+        assert spec["revision"] == "1379f25c6b505a3fc737bd7818cb09389cf807c1"
         assert len(spec["revision"]) == 40  # a real git commit sha
 
     def test_ollama_tag_matches_verified_library_listing(self):
