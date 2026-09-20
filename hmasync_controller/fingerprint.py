@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import platform
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -46,12 +48,37 @@ PROC_CPUINFO = Path("/proc/cpuinfo")
 PROC_MEMINFO = Path("/proc/meminfo")
 
 
+def _sysctl(key: str) -> str | None:
+    """One `sysctl -n <key>`, or None. macOS's stand-in for /proc.
+
+    Added 2026-09-19 with Apple Silicon support. RAM is the figure that
+    matters most on a Mac and the one /proc cannot supply there: memory is
+    unified, so total RAM -- not a VRAM column, which does not exist -- is
+    what says whether a model fits. A Mac row without it cannot be
+    interpreted at all.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", key], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
 def read_cpu_model(path: Path = PROC_CPUINFO) -> str | None:
-    """The `model name` line from /proc/cpuinfo, or None (missing/unreadable/non-Linux)."""
+    """The CPU's marketing name, or None (missing/unreadable/unsupported OS).
+
+    `/proc/cpuinfo`'s `model name` on Linux; `machdep.cpu.brand_string` on
+    macOS, where /proc does not exist and `platform.processor()` answers
+    'arm' -- which identifies nothing.
+    """
     try:
         text = path.read_text()
     except OSError:
-        return None
+        return _sysctl("machdep.cpu.brand_string")
     for line in text.splitlines():
         if line.lower().startswith("model name"):
             _, _, value = line.partition(":")
@@ -61,11 +88,22 @@ def read_cpu_model(path: Path = PROC_CPUINFO) -> str | None:
 
 
 def read_ram_gb(path: Path = PROC_MEMINFO) -> float | None:
-    """Total RAM in GB from /proc/meminfo's `MemTotal` (kB), or None."""
+    """Total RAM in GB, or None.
+
+    `/proc/meminfo`'s `MemTotal` (kB) on Linux; `hw.memsize` (bytes) on
+    macOS. See `_sysctl` for why this one matters more on a Mac than
+    anywhere else.
+    """
     try:
         text = path.read_text()
     except OSError:
-        return None
+        raw = _sysctl("hw.memsize")
+        if raw is None:
+            return None
+        try:
+            return round(float(raw) / (1024**3), 1)
+        except ValueError:
+            return None
     for line in text.splitlines():
         if line.startswith("MemTotal:"):
             parts = line.split()

@@ -211,3 +211,49 @@ def test_collect_fingerprint_never_carries_denylisted_keys(tmp_path, monkeypatch
 
     assert bench.denylisted_keys(payload) == []
     assert set(payload) == {"node_hash", "cpu_model", "ram_gb", "gpu_name", "driver_version", "vram_gb"}
+
+
+class TestMacOsFallbacks:
+    """/proc does not exist on macOS, so both readers fall back to sysctl.
+
+    RAM is the one that matters. Memory is unified on Apple Silicon, so total
+    RAM -- not a VRAM column, which does not exist there -- is what says
+    whether a model fits. Before 2026-09-19 a Mac submission carried neither
+    field, which makes the row uninterpretable rather than merely thin.
+    """
+
+    def test_cpu_model_falls_back_to_sysctl_when_proc_is_absent(self, monkeypatch, tmp_path):
+        from hmasync_controller import fingerprint
+
+        monkeypatch.setattr(
+            fingerprint, "_sysctl", lambda key: "Apple M3 Pro" if "brand" in key else None
+        )
+        assert fingerprint.read_cpu_model(tmp_path / "nope") == "Apple M3 Pro"
+
+    def test_ram_falls_back_to_hw_memsize_in_bytes(self, monkeypatch, tmp_path):
+        from hmasync_controller import fingerprint
+
+        # hw.memsize is BYTES, where MemTotal is kB -- a unit slip here would
+        # report a 36 GB Mac as 34,359 GB and nothing would catch it.
+        monkeypatch.setattr(
+            fingerprint, "_sysctl", lambda key: str(36 * 1024**3) if key == "hw.memsize" else None
+        )
+        assert fingerprint.read_ram_gb(tmp_path / "nope") == 36.0
+
+    def test_a_box_with_neither_source_still_withholds_rather_than_raises(
+        self, monkeypatch, tmp_path
+    ):
+        from hmasync_controller import fingerprint
+
+        monkeypatch.setattr(fingerprint, "_sysctl", lambda key: None)
+        assert fingerprint.read_cpu_model(tmp_path / "nope") is None
+        assert fingerprint.read_ram_gb(tmp_path / "nope") is None
+
+    def test_sysctl_is_inert_off_darwin(self):
+        """It must never shell out on Linux, where the /proc path already won."""
+        import platform
+
+        from hmasync_controller import fingerprint
+
+        if platform.system() != "Darwin":
+            assert fingerprint._sysctl("hw.memsize") is None
