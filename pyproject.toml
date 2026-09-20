@@ -13,12 +13,18 @@ license-files = ["LICENSE"]
 readme = "README.md"
 authors = [{ name = "Async Energy" }]
 keywords = ["energy", "scheduling", "gpu", "llm", "time-of-use", "demand-response"]
+# Trove classifiers are an exact-match vocabulary whose separator is " :: "
+# WITH spaces -- PyPI rejects an upload carrying an unrecognised string, so the
+# spaceless spellings these used would have failed the very first `twine
+# upload`. MacOS sits beside Linux because `bench quick` is supported on Apple
+# Silicon (see APPLE-SILICON.md); Windows genuinely is not.
 classifiers = [
-    "Environment:: GPU:: NVIDIA CUDA",
-    "Intended Audience:: System Administrators",
-    "Operating System:: POSIX:: Linux",
-    "Programming Language:: Python:: 3.12",
-    "Topic:: System:: Distributed Computing",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
 ]
 
 # The canonical pin list. Deliberately thin: the controller is a client — an HTTP

@@ -5,6 +5,16 @@ jobs.json
 *.sqlite
 *.sqlite3
 
+# What a bench run drops in the working tree. The README tells people to run
+# `bench quick` from inside this clone, so these land in a PUBLIC repo unless
+# they are ignored here. The salt is the one that matters most: node_hash is
+# salted with it precisely so a submitted config cannot be reversed to a
+# specific machine, and committing the salt undoes that for every submission
+# this box has ever sent.
+hmasync_node_salt
+bench_bundles/
+bench_data/
+
 # Python
 __pycache__/
 *.py[cod]
