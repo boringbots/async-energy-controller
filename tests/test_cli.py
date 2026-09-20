@@ -1352,7 +1352,7 @@ def test_main_dispatches_bench_quick(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "run_bench_quick",
-        lambda settings, submit_fn=None: (0, "bundle written to x.json"),
+        lambda settings, submit_fn=None, timeout_s=None: (0, "bundle written to x.json"),
     )
 
     assert cli.main(["bench", "quick"]) == 0
@@ -1365,8 +1365,9 @@ def test_main_wires_bench_submit_fn_into_bench_quick(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
     seen = {}
 
-    def fake_run_bench_quick(settings, submit_fn=None):
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
         seen["submit_fn"] = submit_fn
+        seen["timeout_s"] = timeout_s
         return 0, "bundle written to x.json"
 
     monkeypatch.setattr(cli, "run_bench_quick", fake_run_bench_quick)
@@ -1444,7 +1445,7 @@ def test_main_dispatches_bench_calibrate(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "run_bench_calibrate",
-        lambda settings, submit_fn=None: (0, "bundle written to x.json"),
+        lambda settings, submit_fn=None, timeout_s=None: (0, "bundle written to x.json"),
     )
 
     assert cli.main(["bench", "calibrate"]) == 0
@@ -1630,3 +1631,175 @@ def test_main_dispatches_bench_register_node(tmp_path, monkeypatch, capsys):
     )
     assert cli.main(["bench", "register-node"]) == 0
     assert "registered node abc123" in capsys.readouterr().out
+
+
+# --- bench backstop is reachable from outside (Apple Silicon / slow hosts) ---
+#
+# The suite's item counts are fixed, so a box slower than the NVIDIA hardware
+# the defaults were tuned on needs a LONGER budget, not a shorter run -- and a
+# tripped backstop writes no bundle at all, so an operator with no way to raise
+# it simply loses the run on every retry.
+
+
+def test_default_bench_timeout_scales_on_apple_silicon(monkeypatch):
+    monkeypatch.setattr(cli, "is_apple_silicon", lambda: True)
+    assert cli._default_bench_timeout_s(600.0) == 600.0 * cli.BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER
+
+    monkeypatch.setattr(cli, "is_apple_silicon", lambda: False)
+    assert cli._default_bench_timeout_s(600.0) == 600.0
+
+
+def test_bench_timeout_precedence_is_flag_then_setting_then_default(monkeypatch):
+    """Same precedence every other knob follows: flag > env/.env > default."""
+    monkeypatch.setattr(cli, "is_apple_silicon", lambda: False)
+
+    assert cli._resolve_bench_timeout_s(10.0, 20.0, 30.0) == 10.0
+    assert cli._resolve_bench_timeout_s(None, 20.0, 30.0) == 20.0
+    assert cli._resolve_bench_timeout_s(None, None, 30.0) == 30.0
+
+
+def test_bench_quick_accepts_a_timeout_flag():
+    args = cli._parse_args(["bench", "quick", "--timeout", "5400"])
+    assert args.timeout == 5400.0
+
+    args = cli._parse_args(["bench", "calibrate", "--timeout", "1800"])
+    assert args.timeout == 1800.0
+
+    # Absent means "let the box decide", not zero.
+    assert cli._parse_args(["bench", "quick"]).timeout is None
+
+
+def test_bench_timeout_message_names_the_way_out(tmp_path, monkeypatch):
+    """A tripped backstop must name the flag AND the setting -- without them
+    the operator has no way to tell a slow box from a broken one."""
+    settings = _quick_settings(tmp_path)
+
+    async def _hang(**kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(cli, "run_quick_suite", _hang)
+
+    code, message = cli.run_bench_quick(settings, timeout_s=0.05)
+
+    assert code == 1
+    assert "--timeout" in message
+    assert "BENCH_QUICK_TIMEOUT_S" in message
+    assert not list((tmp_path / "bundles").glob("*.json"))
+
+
+def test_over_budget_projection_warns_before_the_backstop_fires(caplog):
+    """The warning is what turns a 45-minute loss into a 20-minute one."""
+    from hmasync_controller.bench import quick as quick_mod
+
+    with caplog.at_level("WARNING"):
+        quick_mod._warn_if_over_budget(
+            elapsed_s=1310.0,  # measured M3: 25 gsm8k items in ~21.8 min
+            items_measured=25,
+            total_items=100,
+            budget_s=45 * 60.0,
+            suite="quick",
+            is_last_task=False,
+        )
+    assert "NO bundle" in caplog.text
+    assert "--timeout" in caplog.text
+
+
+def test_projection_stays_quiet_when_the_run_fits(caplog):
+    from hmasync_controller.bench import quick as quick_mod
+
+    with caplog.at_level("WARNING"):
+        quick_mod._warn_if_over_budget(
+            elapsed_s=60.0,
+            items_measured=25,
+            total_items=100,
+            budget_s=45 * 60.0,
+            suite="quick",
+            is_last_task=False,
+        )
+        # Nor on the final task, where there is nothing left to warn about.
+        quick_mod._warn_if_over_budget(
+            elapsed_s=99_999.0,
+            items_measured=25,
+            total_items=100,
+            budget_s=45 * 60.0,
+            suite="quick",
+            is_last_task=True,
+        )
+    assert caplog.text == ""
+
+
+def test_main_passes_the_timeout_flag_through_to_the_suite(tmp_path, monkeypatch):
+    """The flag is only worth having if it reaches the runner."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    seen = {}
+
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
+        seen["timeout_s"] = timeout_s
+        return 0, "bundle written to x.json"
+
+    monkeypatch.setattr(cli, "run_bench_quick", fake_run_bench_quick)
+    assert cli.main(["bench", "quick", "--timeout", "5400"]) == 0
+    assert seen["timeout_s"] == 5400.0
+
+
+def test_main_falls_back_to_this_boxs_default_timeout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(cli, "is_apple_silicon", lambda: True)
+    seen = {}
+
+    def fake_run_bench_quick(settings, submit_fn=None, timeout_s=None):
+        seen["timeout_s"] = timeout_s
+        return 0, "bundle written to x.json"
+
+    monkeypatch.setattr(cli, "run_bench_quick", fake_run_bench_quick)
+    assert cli.main(["bench", "quick"]) == 0
+    assert seen["timeout_s"] == cli.BENCH_QUICK_TIMEOUT_S * cli.BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER
+
+
+# --- truncated answers must not be published as a quiet accuracy number ---
+
+
+def _truncated_task_run(n_truncated: int, n_items: int = 15):
+    from hmasync_controller.bench.metrics.models import InferenceResult
+    from hmasync_controller.bench.quick import QuickTaskRun
+
+    results = [
+        InferenceResult(
+            request_id=f"r{i}",
+            prompt_tokens=100,
+            completion_tokens=400,
+            ttft_s=0.5,
+            total_s=30.0,
+            tokens_per_second=13.0,
+            finish_reason="length" if i < n_truncated else "stop",
+            correct=False,
+        )
+        for i in range(n_items)
+    ]
+    run = QuickTaskRun.__new__(QuickTaskRun)
+    object.__setattr__(run, "inference_results", results)
+    object.__setattr__(run, "max_tokens", 400)
+    return run
+
+
+def test_warns_when_answers_were_cut_off_at_max_tokens(caplog):
+    """Measured on an M3: 15/15 gsm8k items truncated at 400 tokens, scored
+    20%. That is a cap result wearing a model result's clothes."""
+    from hmasync_controller.bench import quick as quick_mod
+
+    with caplog.at_level("WARNING"):
+        quick_mod._warn_if_answers_were_truncated(_truncated_task_run(15))
+    assert "cut off at max_tokens=400" in caplog.text
+    assert "15/15" in caplog.text
+
+
+def test_no_truncation_warning_when_answers_finished(caplog):
+    from hmasync_controller.bench import quick as quick_mod
+
+    with caplog.at_level("WARNING"):
+        quick_mod._warn_if_answers_were_truncated(_truncated_task_run(0))
+        # A little truncation is normal on a verbose model; stay quiet.
+        quick_mod._warn_if_answers_were_truncated(_truncated_task_run(1))
+    assert caplog.text == ""

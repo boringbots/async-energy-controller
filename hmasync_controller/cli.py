@@ -50,7 +50,10 @@ from hmasync_controller.adapters import (
     normalize_command,
 )
 from hmasync_controller.apiclient import ApiClient
-from hmasync_controller.bench.apple_sampler import AppleEnergyUnavailableError
+from hmasync_controller.bench.apple_sampler import (
+    AppleEnergyUnavailableError,
+    is_apple_silicon,
+)
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
 from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
@@ -950,6 +953,39 @@ BENCH_CALIBRATE_TIMEOUT_S = 10 * 60.0
 """Backstop for the ~3-5 minute calibrate probe -- generous headroom over
 the target, not itself a target (same posture as BENCH_QUICK_TIMEOUT_S)."""
 
+BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER = 3.0
+"""Both backstops above were measured on NVIDIA hardware. The suite's item
+counts are FIXED -- that is what makes two submissions comparable -- so a
+slower box does not run a smaller suite, it runs the same one for longer. A
+measured M3 needs ~79 min for `QUICK_TASKS` against the 45-minute default,
+and a suite that trips its backstop writes no bundle at all, so the whole
+run is lost rather than merely truncated.
+
+Apple Silicon therefore gets the same backstops scaled by this factor, which
+keeps the documented `bench quick` / `bench calibrate` commands working with
+no flag on hardware the README says is supported. It remains only a backstop
+against a wedged run -- `--timeout` and the `BENCH_*_TIMEOUT_S` settings
+override it in both directions."""
+
+
+def _default_bench_timeout_s(base_s: float) -> float:
+    """`base_s`, scaled up on hardware known to be slower than the NVIDIA
+    boxes these backstops were tuned on. Platform inspection only -- no GPU
+    and no sampler is touched, so this is safe to call before a suite runs."""
+    return base_s * BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER if is_apple_silicon() else base_s
+
+
+def _resolve_bench_timeout_s(
+    cli_value: float | None, setting_value: float | None, base_s: float
+) -> float:
+    """Flag beats setting beats default -- the same precedence every other
+    knob in this package follows (see README, "Configure")."""
+    if cli_value is not None:
+        return cli_value
+    if setting_value is not None:
+        return setting_value
+    return _default_bench_timeout_s(base_s)
+
 
 def _bench_utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -1006,7 +1042,18 @@ def _run_bench_suite_cli(
     try:
         result = asyncio.run(asyncio.wait_for(suite_result_coro, timeout=timeout_s))
     except TimeoutError:
-        return 1, f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written"
+        # Name the way out. The backstop firing usually means "this box is
+        # slower than the one the default was tuned on", not "this box is
+        # broken" -- and since no bundle is written, an operator who is not
+        # told to raise the budget simply loses the run again on every retry.
+        suggested_s = int(timeout_s * BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER)
+        return 1, (
+            f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written. "
+            f"The suite's item counts are fixed, so a slower box needs a longer budget rather "
+            f"than a shorter run: re-run as `async-energy-controller bench {suite} "
+            f"--timeout {suggested_s}`, or set BENCH_{suite.upper()}_TIMEOUT_S={suggested_s} "
+            f"in .env to make it the default for this box."
+        )
     except ModelNotAvailableError as e:
         return 2, str(e)
     except (
@@ -1081,16 +1128,22 @@ def run_bench_quick(
     *,
     submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
-    timeout_s: float = BENCH_QUICK_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> tuple[int, str]:
     """Run the ~25-minute onboarding suite in-process; write its artifacts
     and bundle (stamped `suite: "quick"`); hand off to `submit_fn` on
     opt-in. See `_run_bench_suite_cli` for the full exit-code contract.
+
+    `timeout_s` left as None takes this box's default backstop (see
+    `_default_bench_timeout_s`), so a programmatic caller gets the same
+    hardware-aware budget the CLI does.
     """
+    timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_QUICK_TIMEOUT_S)
     return _run_bench_suite_cli(
         settings,
         run_quick_suite(
-            restore_to_factory_default=_bench_restore_to_factory_default(settings)
+            restore_to_factory_default=_bench_restore_to_factory_default(settings),
+            budget_s=timeout_s,
         ),
         suite="quick",
         submit_fn=submit_fn,
@@ -1104,7 +1157,7 @@ def run_bench_calibrate(
     *,
     submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
-    timeout_s: float = BENCH_CALIBRATE_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> tuple[int, str]:
     """Run the ~3-5 minute slimmed calibrate probe in-process (US-MERGE-05);
     write its artifacts and bundle (stamped `suite: "calibrate"`, so a
@@ -1114,15 +1167,38 @@ def run_bench_calibrate(
     publishable measurement; calibrate exists for the scheduling/cap
     figures a box needs fast.
     """
+    timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_CALIBRATE_TIMEOUT_S)
     return _run_bench_suite_cli(
         settings,
         run_calibrate_suite(
-            restore_to_factory_default=_bench_restore_to_factory_default(settings)
+            restore_to_factory_default=_bench_restore_to_factory_default(settings),
+            budget_s=timeout_s,
         ),
         suite="calibrate",
         submit_fn=submit_fn,
         now_fn=now_fn,
         timeout_s=timeout_s,
+    )
+
+
+def _add_bench_timeout_arg(
+    parser: argparse.ArgumentParser, suite: str, base_s: float
+) -> None:
+    """The `--timeout` backstop override shared by `bench quick` and
+    `bench calibrate`. Spelled out per-suite so `--help` names that suite's
+    own default, including the Apple Silicon scaling."""
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            f"Backstop for this run, in seconds (default: "
+            f"{int(_default_bench_timeout_s(base_s))} on this machine). Raise it "
+            f"when the suite is being cut off before it finishes -- the item "
+            f"counts are fixed, so a slower box needs a longer budget, not a "
+            f"shorter run. Overrides BENCH_{suite.upper()}_TIMEOUT_S."
+        ),
     )
 
 
@@ -1304,7 +1380,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "estimates. Requires prior `bench opt-in`."
         ),
     )
-    bench_sub.add_parser(
+    bench_quick = bench_sub.add_parser(
         "quick",
         help=(
             "Run the ~25-minute energy-bench quick suite and write a bundle. "
@@ -1312,7 +1388,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "over `calibrate` unless you only need scheduling figures fast."
         ),
     )
-    bench_sub.add_parser(
+    _add_bench_timeout_arg(bench_quick, "quick", BENCH_QUICK_TIMEOUT_S)
+    bench_calibrate = bench_sub.add_parser(
         "calibrate",
         help=(
             "Run a ~3-5 minute slimmed probe (one task plus the power "
@@ -1321,6 +1398,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "`bench quick` for the leaderboard-grade measurement."
         ),
     )
+    _add_bench_timeout_arg(bench_calibrate, "calibrate", BENCH_CALIBRATE_TIMEOUT_S)
     bench_submit = bench_sub.add_parser(
         "submit",
         help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
@@ -1352,9 +1430,23 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "subcommand", None) == "bench":
         bench_sub = getattr(args, "bench_subcommand", None)
         if bench_sub == "quick":
-            code, message = run_bench_quick(settings, submit_fn=_bench_submit_fn)
+            code, message = run_bench_quick(
+                settings,
+                submit_fn=_bench_submit_fn,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout, settings.BENCH_QUICK_TIMEOUT_S, BENCH_QUICK_TIMEOUT_S
+                ),
+            )
         elif bench_sub == "calibrate":
-            code, message = run_bench_calibrate(settings, submit_fn=_bench_submit_fn)
+            code, message = run_bench_calibrate(
+                settings,
+                submit_fn=_bench_submit_fn,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout,
+                    settings.BENCH_CALIBRATE_TIMEOUT_S,
+                    BENCH_CALIBRATE_TIMEOUT_S,
+                ),
+            )
         elif bench_sub == "submit":
             code, message = run_bench_submit(settings, args.bundle_path)
         elif bench_sub == "register-node":

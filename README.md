@@ -81,7 +81,7 @@ Requires **Python 3.12+**, and Linux or macOS on Apple Silicon.
 ```bash
 git clone https://github.com/boringbots/async-energy-controller.git
 cd async-energy-controller
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 
 pip install -e .   # installs and runs fine with no GPU driver — energy stays null
 ```
@@ -468,6 +468,47 @@ before anything is sent, and refused rather than sent if either check fails. If
 the API is unreachable when a submission is ready, it spools to disk and goes
 out on the controller's normal reconnect cadence — the same offline-safe
 pattern used for run reports.
+
+**You need an inference server running first.** The suite attaches to one; it
+never launches an engine or pulls a model itself, which is why that lifecycle
+stays in your hands:
+
+```bash
+ollama serve &                      # or llama-server
+ollama pull qwen3.5:9b-q4_K_M       # the fixed reference model, ~6.6 GB
+```
+
+The reference model is deliberately the same on every box — that is what makes
+two submissions comparable — so it is never swapped for a smaller one on
+smaller hardware. Budget ~6 GB for weights plus whatever the KV cache grows to.
+
+### How long it really takes — `--timeout`
+
+The "~25 minutes" above was measured on NVIDIA hardware. The item counts are
+fixed, so a slower box does not run a smaller suite — it runs the same one for
+longer. A measured M3 needs **~79 minutes** for the full `QUICK_TASKS` set.
+
+Both suites carry a backstop against a wedged run, and a run that trips it
+writes **no bundle at all**: the work is lost, not truncated. So the backstop
+is both scaled up automatically on Apple Silicon and overridable everywhere:
+
+```bash
+async-energy-controller bench quick --timeout 9000     # this run only
+echo 'BENCH_QUICK_TIMEOUT_S=9000' >> .env              # this box, from now on
+```
+
+| Default backstop | NVIDIA | Apple Silicon |
+|---|---|---|
+| `bench quick` | 45 min | 135 min |
+| `bench calibrate` | 10 min | 30 min |
+
+Precedence is the usual one: `--timeout` beats `BENCH_*_TIMEOUT_S` beats the
+default. At each task boundary the suite projects whether it will fit and warns
+if it will not, naming the command to re-run with — so you learn a few minutes
+in rather than at the backstop.
+
+Raise the budget rather than looking for a way to shorten the suite: the fixed
+item counts are the whole basis of comparability.
 
 ### A faster option — `bench calibrate`
 

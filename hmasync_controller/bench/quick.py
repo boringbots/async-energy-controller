@@ -699,6 +699,81 @@ def _build_run_metrics(
         return None
 
 
+TRUNCATION_WARN_FRACTION = 0.2
+"""Warn once a task's truncated share reaches this. Some truncation is
+normal on a verbose model; a fifth of the items is not, and past that the
+accuracy figure is measuring `max_tokens` more than it measures the model."""
+
+
+def _warn_if_answers_were_truncated(task_run: QuickTaskRun) -> None:
+    """Say so when answers were cut off at `max_tokens` rather than finished.
+
+    A response that stops on `length` is graded against a sentence the model
+    never got to finish, so it is usually scored wrong -- and nothing else in
+    this suite surfaces that. A gsm8k_platinum run measured on an M3 came back
+    at 20% accuracy with 15/15 items truncated at 400 tokens: the number looks
+    like a model result and is really a cap result.
+
+    This package's whole posture is that it does not present guesses as
+    measurements, so the run still completes and still reports -- it just
+    stops being quiet about why the accuracy is what it is.
+    """
+    results = task_run.inference_results
+    if not results:
+        return
+    n_truncated = sum(1 for r in results if r.finish_reason == "length")
+    if not n_truncated:
+        return
+    fraction = n_truncated / len(results)
+    if fraction < TRUNCATION_WARN_FRACTION:
+        return
+    accuracy_pct = 100.0 * sum(1 for r in results if r.correct) / len(results)
+    logger.warning(
+        "  %d/%d answers were cut off at max_tokens=%d (finish_reason=length). "
+        "A truncated answer is graded against a sentence the model never "
+        "finished, so this task's accuracy (%.0f%%) reads low for a reason that "
+        "is not the model. Energy and throughput here are still valid.",
+        n_truncated,
+        len(results),
+        task_run.max_tokens,
+        accuracy_pct,
+    )
+
+
+def _warn_if_over_budget(
+    *,
+    elapsed_s: float,
+    items_measured: int,
+    total_items: int,
+    budget_s: float | None,
+    suite: str,
+    is_last_task: bool,
+) -> None:
+    """Say early that this run is not going to fit its backstop.
+
+    Tripping the backstop writes NO bundle, so the difference between
+    learning at minute 20 and learning at minute 45 is the difference
+    between re-running once and losing the work twice. The projection is
+    deliberately crude -- per-item cost varies a lot between tasks, so it
+    is stated as an estimate and only ever WARNS; nothing is aborted on the
+    strength of it.
+    """
+    if budget_s is None or is_last_task or not items_measured:
+        return
+    projected_s = elapsed_s / items_measured * total_items
+    if projected_s <= budget_s:
+        return
+    logger.warning(
+        "  at this pace the suite needs ~%d min, over the %d min backstop -- it will "
+        "stop with NO bundle written. Cancel now and re-run as `async-energy-controller "
+        "bench %s --timeout %d` to keep the work.",
+        round(projected_s / 60),
+        round(budget_s / 60),
+        suite,
+        int(projected_s * 1.5),
+    )
+
+
 async def _run_bench_suite(
     *,
     engine_choice: str | None,
@@ -710,6 +785,7 @@ async def _run_bench_suite(
     max_sweep_points: int | None,
     label_prefix_stem: str,
     restore_to_factory_default: bool = True,
+    budget_s: float | None = None,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -805,6 +881,10 @@ async def _run_bench_suite(
     sweep_points: list[PowerSweepPoint] = []
     skipped_reason: str | None = None
 
+    total_items = sum(n for _, n in tasks)
+    items_measured = 0
+    suite_started_at = time.monotonic()
+
     try:
         for i, (task_name, n_items) in enumerate(tasks, start=1):
             logger.info("[%d/%d] %s (n=%d)...", i, len(tasks), task_name, n_items)
@@ -817,7 +897,23 @@ async def _run_bench_suite(
                 continue
             task_runs.append(task_run)
             n_correct = sum(1 for r in task_run.inference_results if r.correct)
-            logger.info("  done: %d/%d correct", n_correct, task_run.n_items)
+            elapsed_s = time.monotonic() - suite_started_at
+            items_measured += task_run.n_items
+            logger.info(
+                "  done: %d/%d correct (%.1f min elapsed)",
+                n_correct,
+                task_run.n_items,
+                elapsed_s / 60,
+            )
+            _warn_if_answers_were_truncated(task_run)
+            _warn_if_over_budget(
+                elapsed_s=elapsed_s,
+                items_measured=items_measured,
+                total_items=total_items,
+                budget_s=budget_s,
+                suite=label_prefix_stem,
+                is_last_task=i == len(tasks),
+            )
 
         gsm8k_baseline = next(
             (
@@ -924,11 +1020,16 @@ async def run_quick_suite(
     llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
     target_host: str | None = None,
     restore_to_factory_default: bool = True,
+    budget_s: float | None = None,
 ) -> QuickSuiteResult:
     """Run the ~25-minute onboarding suite end to end, in-process: the full
     `QUICK_TASKS` set plus the mini power sweep's full derived ladder. The
     leaderboard-grade, publishable measurement -- see `_run_bench_suite` for
     the shared behavior contract (restore-in-finally, exceptions raised).
+
+    `budget_s` is the caller's backstop, used only to warn at a task
+    boundary when this run is not going to fit inside it. This function
+    never enforces it -- the CLI layer owns the actual timeout.
     """
     return await _run_bench_suite(
         engine_choice=engine_choice,
@@ -940,6 +1041,7 @@ async def run_quick_suite(
         max_sweep_points=None,
         label_prefix_stem="quick",
         restore_to_factory_default=restore_to_factory_default,
+        budget_s=budget_s,
     )
 
 
@@ -966,6 +1068,7 @@ async def run_calibrate_suite(
     llamacpp_port: int = DEFAULT_LLAMACPP_PORT,
     target_host: str | None = None,
     restore_to_factory_default: bool = True,
+    budget_s: float | None = None,
 ) -> QuickSuiteResult:
     """Run the ~3-5 minute slimmed scheduling probe (US-MERGE-05): one
     decode task (`CALIBRATE_TASKS`, ~15 items) plus the mini power sweep's
@@ -991,4 +1094,5 @@ async def run_calibrate_suite(
         max_sweep_points=CALIBRATE_MAX_SWEEP_POINTS,
         label_prefix_stem="calibrate",
         restore_to_factory_default=restore_to_factory_default,
+        budget_s=budget_s,
     )

@@ -81,6 +81,18 @@ class Settings(BaseSettings):
     # (node_hash) is. Relative paths resolve against the controller's working
     # directory, same as every other *_PATH setting.
     NODE_SALT_PATH: str = "hmasync_node_salt"
+    # Backstop for `bench quick` / `bench calibrate`, in seconds. Left unset,
+    # each suite takes its own default from cli.py, which is tuned on NVIDIA
+    # hardware and scaled up automatically on Apple Silicon (see
+    # cli.py::_default_bench_timeout_s). Set either here — or per-run with
+    # `--timeout` — when a box needs longer still.
+    #
+    # Raise the budget rather than cutting items: the fixed item counts are
+    # what make one submission comparable to another, and a suite that trips
+    # the backstop writes NO bundle at all, so the whole run is wasted rather
+    # than merely truncated.
+    BENCH_QUICK_TIMEOUT_S: float | None = None
+    BENCH_CALIBRATE_TIMEOUT_S: float | None = None
 
     # --- power-curve cap (opt-in; a separate consent from BENCH_OPTIN) ---
     # Off by default. When true AND this box has an NVML-backed GPU, the

@@ -10,7 +10,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .                    # pulls the Apple energy backend too
 
 ollama serve &                      # or llama-server, if you prefer
-ollama pull qwen3.5:9b-q4_K_M       # the fixed reference model, ~6 GB
+ollama pull qwen3.5:9b-q4_K_M       # the fixed reference model, ~6.6 GB
 async-energy-controller bench quick
 ```
 
@@ -24,6 +24,34 @@ no `--extra` to remember.
 interpreter that is genuinely arm64 -- if `python3` came from an x86 Homebrew
 or is running under Rosetta, the platform marker will not match and you will
 get the NVML path and its confusing error.
+
+### Budget the time before you start it
+
+**A Mac is slower at this than the NVIDIA boxes the suite was tuned on, and
+the item counts do not shrink to compensate** -- that fixed count is exactly
+what makes your submission comparable to anyone else's. Measured on an M3
+(24 GB, `qwen3.5:9b-q4_K_M` under Ollama):
+
+| Task | Items | Time |
+|---|---|---|
+| `gsm8k_platinum` | 25 | ~22 min |
+| `mmlu_redux` | 50 | ~7 min |
+| `ifeval` | 25 | ~50 min |
+| **Total** | **100** | **~79 min** |
+
+So on Apple Silicon the backstop defaults to **135 min** for `bench quick` and
+**30 min** for `bench calibrate` -- 3x the NVIDIA defaults -- and the commands
+above need no flag. If your machine is slower still (a fanless Air, or one
+sharing its GPU with a display-heavy desktop), raise it:
+
+```bash
+async-energy-controller bench quick --timeout 14400
+```
+
+A run that hits the backstop writes **no bundle at all**, so set this
+generously: too much budget costs nothing, too little costs the entire run.
+The suite projects at each task boundary whether it is going to fit, and warns
+with the exact re-run command when it is not.
 
 ### How much memory you need
 
