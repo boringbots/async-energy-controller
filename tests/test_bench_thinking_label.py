@@ -108,3 +108,19 @@ def test_the_ladder_matches_on_family_not_exact_tag():
 
     for tag in ("gpt-oss:20b", "gpt-oss:120b", "gpt-oss:20b-mxfp4"):
         assert thinking_kwargs_for("ollama", False, tag) == {"reasoning_effort": "low"}, tag
+
+
+def test_the_ladder_rule_is_about_the_model_not_the_endpoint():
+    """`reasoning_effort: none` and Ollama's native `think: false` are the
+    same knob and DO work -- measured on Qwen3.5-9B, 2407 reasoning chars to
+    0. gpt-oss ignores both and honours only low/medium/high. So the rule is
+    keyed on the model, and a switch model keeps the generic kwargs at every
+    engine."""
+    from hmasync_controller.bench.quick import thinking_kwargs_for
+
+    assert thinking_kwargs_for("ollama", False, "qwen3.5:9b-q4_K_M")["reasoning_effort"] == "none"
+    assert thinking_kwargs_for("ollama", False, "gpt-oss:20b")["reasoning_effort"] == "low"
+    # llama.cpp serves the switch model with enable_thinking, the anchor's label.
+    assert thinking_kwargs_for("llamacpp", False, "Qwen3.5-9B-Q4_K_M.gguf") == {
+        "enable_thinking": False
+    }

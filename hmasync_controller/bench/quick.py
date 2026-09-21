@@ -857,6 +857,20 @@ byte-identical to `medium` -- which means the generic thinking-off kwargs are
 a NO-OP here, and a row carrying them would claim thinking-off while having
 reasoned at medium. That is the mislabeling this whole axis exists to stop.
 
+This is the MODEL, not the endpoint, and not Ollama lacking an off switch.
+`reasoning_effort: none` and Ollama's native `think: false` are the same
+knob -- byte-identical results at both endpoints -- and on a switch model
+they work exactly as advertised. Same sweep, same prompt, Qwen3.5-9B beside
+gpt-oss-20b, reasoning-channel characters:
+
+                        unset    none/think=false    low
+    Qwen3.5-9B           2407         0 (works)     2407 (ignored)
+    gpt-oss-20b           105       105 (ignored)     47 (works)
+
+Each model ignores precisely the vocabulary it does not implement. gpt-oss
+has no off at either endpoint, so the axis has to be expressed in the terms
+it does have.
+
 energy-bench reached the same shape independently: its gpt-oss configs are
 `axis-*-effort-low-*` and `axis-*-effort-high-*`, whose headers read "the low
 rung of the reasoning_effort ladder; medium is the reference row". There is
