@@ -142,7 +142,9 @@ __all__ = [
     "QUICK_REFERENCE_MODEL_HF_ID",
     "QUICK_REFERENCE_N_SHOT",
     "QUICK_REFERENCE_SEED",
+    "FULL_TASKS",
     "QUICK_TASKS",
+    "tasks_for_tier",
     "THINKING_MODE_OFF",
     "EFFORT_LADDER_MODELS",
     "THINKING_MODE_OFF_OLLAMA",
@@ -210,6 +212,45 @@ QUICK_TASKS: list[tuple[str, int]] = [
 """(task, n_items) pairs -- a scaled-down slice of the community core-9 chosen
 to fit the ~25-minute time budget, same n counts as energy-bench's `eb
 quick`."""
+
+FULL_TASKS: list[tuple[str, int]] = [
+    ("gsm8k_platinum", 100),
+    ("mmlu_redux", 100),
+    ("math500", 50),
+]
+"""What `bench full` measures: the lab's reference-wave tasks at the lab's
+own item counts, so every row it produces has a counterpart to sit beside.
+
+QUICK_TASKS is a scaled-down slice chosen for a ~25-minute budget, and two of
+its three tasks cannot pair with anything: `ifeval` is in no lab wave at all,
+and the 25/50 counts are a different measurement from the wave's 100/100
+(the public grouping key omits n_items, so they do key -- but a 25-item
+accuracy is a coarser estimate of the same quantity).
+
+`gpqa_diamond` is the wave's fourth task and is deliberately absent:
+`Idavidrein/gpqa` is a gated HuggingFace dataset, so it fails at load on any
+box without accepted terms and an HF_TOKEN. Including it would make the
+breadth tier abort on most machines for a task most machines cannot fetch.
+
+Measured cost on this roster (qwen3:8b, thinking off): gsm8k_platinum 13.3
+s/item, mmlu_redux 2.4, math500 101.9 -- so math500 is ~85 of the ~111
+minutes per model. It stays because it is the one hard-reasoning task the lab
+measures and the axis where models actually separate.
+
+Deliberately NOT here: hellaswag, mmlu, gsm8k and longctx_summary all load
+and run, but appear in no lab wave, so their rows would pair with nothing.
+longctx_summary alone is ~46 min per model at 111 s/item.
+"""
+
+def tasks_for_tier(tier: str) -> list[tuple[str, int]]:
+    """What a tier measures.
+
+    `full` is the breadth tier and runs the lab's reference-wave tasks at the
+    lab's counts, so its rows have counterparts. Everything else runs the
+    scaled-down QUICK_TASKS slice that fits a ~25-minute budget.
+    """
+    return FULL_TASKS if tier == "full" else QUICK_TASKS
+
 
 POWER_SWEEP_TASK = "gsm8k_platinum"
 """The mini power sweep reuses the baseline pass's own gsm8k_platinum run as
@@ -1420,7 +1461,7 @@ async def run_tier_suite(
                         ollama_port=ollama_port,
                         llamacpp_port=llamacpp_port,
                         target_host=target_host,
-                        tasks=QUICK_TASKS,
+                        tasks=tasks_for_tier(tier),
                         max_sweep_points=None,
                         label_prefix_stem=tier,
                         restore_to_factory_default=restore_to_factory_default,

@@ -545,8 +545,8 @@ trace's first paragraph break.
 |---|---|---|---|
 | `bench calibrate` | scheduling figures, fast | 1 | ~5 min |
 | `bench quick` | this box on a known workload | 1 | ~30 min |
-| `bench medium` | **which model runs best here** | 4 | ~2 h |
-| `bench full` | medium, plus the thinking axis | 4 × 2 | ~8 h |
+| `bench medium` | which model runs best here, **and at which thinking setting** | 4 × 2 | ~20 h (~2 h with `--thinking` pinning one rung) |
+| `bench full` | **every model this box can serve**, on the lab's own tasks | all that fit | ~13 h |
 | `bench reference` | **the Efficiency Index anchor** | 1 | ~1 h |
 
 `medium` and `full` measure a pinned roster — each entry fixed by Ollama tag
@@ -554,6 +554,27 @@ trace's first paragraph break.
 They never pull: a model that is not present is reported with the exact
 `ollama pull` and its size, and one too large for the box is skipped rather
 than suggested.
+
+The two answer different questions, and the cost does not follow the names:
+
+- **`medium` — depth.** The 4 largest models that fit, on the three quick
+  tasks, with thinking swept off *and* on. The ON half is ~9x the wall clock
+  of the OFF half, which is what makes this the more expensive tier. Pass
+  `--thinking` to pin one rung and get the ~2 h version.
+- **`full` — breadth.** Every model this box can serve, on the lab's
+  reference-wave tasks at the lab's item counts (`gsm8k_platinum` x100,
+  `mmlu_redux` x100, `math500` x50), thinking pinned off. Every row it
+  produces has a lab counterpart to sit beside, which the quick tasks cannot
+  promise: `ifeval` appears in no lab wave at all.
+
+`gpqa_diamond` is the wave's fourth task and is deliberately left out —
+`Idavidrein/gpqa` is a gated dataset, so it fails at load on any box without
+accepted terms and an `HF_TOKEN`, and a breadth tier should not abort on a
+task most machines cannot fetch.
+
+Measured per-item on a 24 GB M3 (qwen3:8b, thinking off): `gsm8k_platinum`
+13.3 s, `mmlu_redux` 2.4 s, `math500` 101.9 s. math500 is ~75% of `full`'s
+runtime and stays because it is the one hard-reasoning task the lab measures.
 
 The roster is the most-pulled models on energy-bench's measured
 accuracy-vs-energy frontier, largest first: `qwen3-coder:30b-a3b-q4_K_M`,

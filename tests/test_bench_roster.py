@@ -75,10 +75,15 @@ class TestTierSelection:
         assert all(e.size_gb <= 12.0 for e in picked)
         assert picked[0].tag == "qwen3.5:9b-q4_K_M"
 
-    def test_full_measures_the_medium_roster_not_more_models(self):
-        """full spends its extra budget on the thinking axis (~9x energy,
-        decisive on one task in four) rather than a fifth same-size model."""
-        assert roster_for_tier("full") == roster_for_tier("medium")
+    def test_full_measures_more_models_than_medium(self):
+        """The tiers swapped jobs: medium took the thinking axis (it and the
+        old full measured the same 4 models on the same 3 tasks), and full
+        became breadth -- every model the box can serve."""
+        assert len(roster_for_tier("full")) > len(roster_for_tier("medium"))
+        # medium's roster stays a prefix of full's, so the two nest.
+        assert roster_for_tier("medium") == roster_for_tier("full")[
+            : len(roster_for_tier("medium"))
+        ]
 
     def test_splits_into_measurable_and_needs_pulling(self):
         present, missing = select_roster(
@@ -113,10 +118,13 @@ class TestTierCli:
         assert args.thinking is None
 
     def test_tier_backstops_are_sized_for_the_work(self):
-        # full is the medium roster twice over, and its ON half is ~9x the
-        # wall clock of its OFF half.
-        assert cli.BENCH_FULL_TIMEOUT_S > cli.BENCH_MEDIUM_TIMEOUT_S
-        assert cli.BENCH_MEDIUM_TIMEOUT_S > cli.BENCH_QUICK_TIMEOUT_S
+        """Note the inversion: medium's backstop is the LARGER one. Sweeping
+        the thinking axis across 4 models (~20 h, the ON half being ~9x the
+        wall clock of the OFF half) costs more than running 7 models once on
+        the reference-wave tasks (~13 h). Cost here tracks the axis count,
+        not the tier's name."""
+        assert cli.BENCH_MEDIUM_TIMEOUT_S > cli.BENCH_FULL_TIMEOUT_S
+        assert cli.BENCH_FULL_TIMEOUT_S > cli.BENCH_QUICK_TIMEOUT_S
 
     def test_the_schema_accepts_the_new_suites(self):
         import json
@@ -177,3 +185,110 @@ class TestBudgetDetection:
         present, missing = select_roster("medium", available_tags=all_tags, budget_gb=16.8)
         assert len(present) == TIER_MODEL_COUNTS["medium"]
         assert all(e.size_gb <= 16.8 for e in present)
+
+
+class TestTierShapeAfterTheSwap:
+    """`medium` absorbed the old `full` (same 4 models, same 3 tasks, plus the
+    thinking sweep). `full` became the breadth tier."""
+
+    def test_full_measures_every_model_that_fits_not_a_prefix(self):
+        from hmasync_controller.bench.roster import TIER_MODEL_COUNTS
+
+        assert TIER_MODEL_COUNTS["full"] is None, "None = no prefix cap"
+        budget = 16.8  # a 24 GB Apple Silicon box
+        fits = [e for e in ROSTER if e.size_gb <= budget]
+        assert len(roster_for_tier("full", budget_gb=budget)) == len(fits)
+        # ... and that is strictly more than medium's prefix.
+        assert len(roster_for_tier("full", budget_gb=budget)) > len(
+            roster_for_tier("medium", budget_gb=budget)
+        )
+
+    def test_full_reaches_the_frontier_model_the_prefix_missed(self):
+        """Qwen2.5-7B is on the lab's accuracy-vs-energy frontier (0.90 gsm8k
+        at 304 J/correct) and sits 7th by size, so a 4-model prefix on a 24 GB
+        box never saw it."""
+        tags = {e.tag for e in roster_for_tier("full", budget_gb=16.8)}
+        assert "qwen2.5:7b-instruct-q4_K_M" in tags
+        assert "qwen2.5:7b-instruct-q4_K_M" not in {
+            e.tag for e in roster_for_tier("medium", budget_gb=16.8)
+        }
+
+    def test_full_still_respects_the_budget(self):
+        for e in roster_for_tier("full", budget_gb=16.8):
+            assert e.size_gb <= 16.8
+
+    def test_full_runs_the_lab_wave_tasks_at_lab_counts(self):
+        from hmasync_controller.bench.quick import FULL_TASKS, QUICK_TASKS, tasks_for_tier
+
+        assert tasks_for_tier("full") == FULL_TASKS
+        assert dict(FULL_TASKS) == {
+            "gsm8k_platinum": 100,
+            "mmlu_redux": 100,
+            "math500": 50,
+        }
+        # quick/medium keep the scaled-down slice
+        assert tasks_for_tier("medium") == QUICK_TASKS
+        assert tasks_for_tier("quick") == QUICK_TASKS
+
+    def test_gpqa_is_excluded_from_full_on_purpose(self):
+        """The wave's fourth task is a GATED HuggingFace dataset; including it
+        would abort the breadth tier on any box without accepted terms."""
+        from hmasync_controller.bench.quick import FULL_TASKS
+
+        assert "gpqa_diamond" not in dict(FULL_TASKS)
+
+    def test_ifeval_is_not_in_full(self):
+        """It pairs with no lab row, which is what full exists to guarantee."""
+        from hmasync_controller.bench.quick import FULL_TASKS
+
+        assert "ifeval" not in dict(FULL_TASKS)
+
+
+class TestThinkingAxisMovedToMedium:
+    def test_medium_sweeps_both_rungs_when_nothing_is_pinned(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake(**kw):
+            seen["axis"] = kw.get("thinking_axis")
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(cli, "run_tier_suite", fake)
+        monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
+        try:
+            cli.run_bench_tier(cli.Settings(), "medium", thinking=None)
+        except Exception:
+            pass
+        assert seen["axis"] == (False, True)
+
+    def test_an_explicit_flag_pins_one_rung(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake(**kw):
+            seen["axis"] = kw.get("thinking_axis")
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(cli, "run_tier_suite", fake)
+        monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
+        try:
+            cli.run_bench_tier(cli.Settings(), "medium", thinking=True)
+        except Exception:
+            pass
+        assert seen["axis"] == (True,)
+
+    def test_full_always_pins_thinking_off(self, tmp_path, monkeypatch):
+        """Sweeping the axis across every model would multiply a 13-hour run
+        by thinking's ~9x cost on reasoning tasks."""
+        seen = {}
+
+        def fake(**kw):
+            seen["axis"] = kw.get("thinking_axis")
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(cli, "run_tier_suite", fake)
+        monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
+        for pin in (None, True, False):
+            try:
+                cli.run_bench_tier(cli.Settings(), "full", thinking=pin)
+            except Exception:
+                pass
+            assert seen["axis"] == (False,), pin

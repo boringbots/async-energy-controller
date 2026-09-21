@@ -966,14 +966,18 @@ BENCH_REFERENCE_TIMEOUT_S = 3 * 60 * 60.0
 measured on an M3 with thinking off is ~66 min, so this is ~2.5x headroom for
 a slower box. Scaled again on Apple Silicon like every other backstop."""
 
-BENCH_MEDIUM_TIMEOUT_S = 4 * 60 * 60.0
-"""Backstop for the 4-model medium tier (~2 h measured target, 2x headroom)."""
+BENCH_MEDIUM_TIMEOUT_S = 40 * 60 * 60.0
+"""Backstop for medium, which now sweeps the thinking axis across four
+models (it absorbed the old `full`). The OFF half is ~2 h measured; the ON
+half is the expensive one, since thinking costs ~9x the wall clock on the
+same items -- so the target is ~20 h and this is 2x headroom over it."""
 
-BENCH_FULL_TIMEOUT_S = 16 * 60 * 60.0
-"""Backstop for full: the medium roster twice over, once per thinking
-setting. Thinking-on is ~9x the energy and ~9x the wall clock on the same
-items, so the headroom here is over a target that is itself mostly the ON
-half."""
+BENCH_FULL_TIMEOUT_S = 30 * 60 * 60.0
+"""Backstop for full: every model this box can serve, on the reference-wave
+tasks. Measured per-item on this roster (qwen3:8b, thinking off):
+gsm8k_platinum 13.3 s, mmlu_redux 2.4 s, math500 101.9 s -- ~111 min per
+model, so ~13 h across seven. math500 alone is ~75% of that. Roughly 2x
+headroom, and more models fit on a bigger card than this was measured on."""
 
 BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER = 3.0
 """Both backstops above were measured on NVIDIA hardware. The suite's item
@@ -1311,20 +1315,32 @@ def run_bench_tier(
     submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
     timeout_s: float | None = None,
-    thinking: bool = False,
+    thinking: bool | None = None,
 ) -> tuple[int, str]:
     """Run a multi-model tier and bundle every cell it measured.
 
-    `full` sweeps the thinking axis itself, so an explicit `--thinking` there
-    would ask for half the tier; the flag is honored for `medium`, where the
-    whole tier shares one pinned setting.
+    `medium` sweeps the thinking axis by default (it absorbed the old `full`);
+    an explicit `--thinking` there pins one rung instead of sweeping both.
+    `full` always pins thinking off -- see the comment on `axis` below.
     """
     timeout_s = _resolve_bench_timeout_s(
         timeout_s,
         None,
         BENCH_MEDIUM_TIMEOUT_S if tier == "medium" else BENCH_FULL_TIMEOUT_S,
     )
-    axis = (False, True) if tier == "full" else (thinking,)
+    # The thinking axis belongs to `medium` now: medium and the old `full`
+    # measured the SAME four models on the SAME three tasks and differed only
+    # by this sweep, so they were one tier wearing two names. `full` is the
+    # breadth tier instead -- every model this box can serve, on the lab's
+    # reference-wave tasks -- and pins thinking off, because sweeping the axis
+    # across seven models would multiply a 13-hour run by the ~9x thinking
+    # costs on reasoning tasks and put it beyond any single sitting.
+    if tier == "full":
+        axis = (False,)
+    elif thinking is None:
+        axis = (False, True)
+    else:
+        axis = (bool(thinking),)
     return _run_bench_suite_cli(
         settings,
         _merge_tier_results(
@@ -1568,9 +1584,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     bench_medium = bench_sub.add_parser(
         "medium",
         help=(
-            "Measure the pinned 4-model roster on the same three tasks, so "
-            "you can see which model runs best on THIS box. ~2 hours. Not "
-            "Efficiency-Index comparable -- use `bench reference` for that."
+            "The 4 largest roster models this box can serve, on the three "
+            "quick tasks, with the thinking axis swept off AND on (pass "
+            "--thinking to pin one rung instead). ~20 hours with the sweep, "
+            "~2 without. Use `bench full` for breadth across models."
         ),
     )
     _add_bench_timeout_arg(bench_medium, "medium", BENCH_MEDIUM_TIMEOUT_S)
@@ -1578,9 +1595,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     bench_full = bench_sub.add_parser(
         "full",
         help=(
-            "The medium roster measured with thinking both off AND on -- the "
-            "axis energy-bench found worth ~9x the energy and decisive on one "
-            "task in four. ~8 hours."
+            "EVERY roster model this box can serve, on the lab's "
+            "reference-wave tasks at the lab's item counts (gsm8k_platinum "
+            "x100, mmlu_redux x100, math500 x50), thinking pinned off -- so "
+            "every row has a lab counterpart to sit beside. ~13 hours on a "
+            "7-model box; math500 is ~75%% of it."
         ),
     )
     _add_bench_timeout_arg(bench_full, "full", BENCH_FULL_TIMEOUT_S)
@@ -1668,8 +1687,14 @@ def main(argv: list[str] | None = None) -> int:
                     None,
                     BENCH_MEDIUM_TIMEOUT_S if bench_sub == "medium" else BENCH_FULL_TIMEOUT_S,
                 ),
+                # None is meaningful here and must survive: for `medium` it
+                # means "sweep both rungs" (the behaviour it absorbed from the
+                # old `full`), while an explicit flag or a BENCH_THINKING of
+                # true pins one. `full` ignores it and pins off either way.
                 thinking=(
-                    settings.BENCH_THINKING if args.thinking is None else args.thinking
+                    args.thinking
+                    if args.thinking is not None
+                    else (True if settings.BENCH_THINKING else None)
                 ),
             )
         elif bench_sub == "submit":

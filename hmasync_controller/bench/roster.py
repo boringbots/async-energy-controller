@@ -176,10 +176,17 @@ do not fit the card `bench quick` is sized for."""
 REFERENCE_ENTRY: RosterEntry = next(e for e in ROSTER if e.tag == REFERENCE_TAG)
 
 
-TIER_MODEL_COUNTS: dict[str, int] = {
+TIER_MODEL_COUNTS: dict[str, int | None] = {
     "quick": 1,
     "medium": 4,
-    "full": 4,
+    # None = every model this box can hold. `full` is the breadth tier: its
+    # job is "which of the models I could actually serve runs best here",
+    # and a prefix of four answers that only for boxes whose four largest
+    # happen to be the interesting ones. On a 24 GB card the prefix stops
+    # before Qwen2.5-7B, which sits ON the lab's accuracy-vs-energy frontier
+    # (0.90 gsm8k at 304 J/correct) -- so the old `full` could not see the
+    # best-value model in its own roster.
+    "full": None,
 }
 """How many roster models each tier measures, largest-first.
 
@@ -260,7 +267,8 @@ def roster_for_tier(tier: str, *, budget_gb: float | None = None) -> tuple[Roste
     if tier == "quick":
         return (REFERENCE_ENTRY,)
     fitting = tuple(e for e in ROSTER if budget_gb is None or e.size_gb <= budget_gb)
-    return fitting[: TIER_MODEL_COUNTS[tier]]
+    count = TIER_MODEL_COUNTS[tier]
+    return fitting if count is None else fitting[:count]
 
 
 def select_roster(
