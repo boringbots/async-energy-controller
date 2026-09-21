@@ -14,6 +14,12 @@ jobs.json
 hmasync_node_salt
 bench_bundles/
 bench_data/
+# Reference weights. `bench reference` tells people to download the pinned
+# GGUF into ./ref, which is 5.2 GB of model sitting in the working tree of a
+# repo that IS the public distribution -- ignored so the documented command
+# cannot end up as a commit.
+ref/
+*.gguf
 
 # Python
 __pycache__/
