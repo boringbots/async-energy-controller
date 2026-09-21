@@ -38,22 +38,26 @@ class IFEvalTask(Task):
     # does not include ifeval at all, so there is no lab figure to match and
     # no comparability argument for borrowing 8192.
     #
-    # Swept on qwen3.5:9b-q4_K_M, n=25, thinking off, cap opened to 8192 to
-    # see what the task actually wants:
+    # Swept per model with the cap opened wide, n=25, thinking off, because
+    # one model's demand is not the task's demand -- a 2048 cap set from
+    # qwen3.5 alone still truncated qwen3:8b:
     #
-    #     mean 268   median 225   p90 629   MAX 1323
-    #     over 2048: 0      hit 8192: 0      accuracy 0.80
+    #     model              mean  median  p90   MAX   >2048  >4096
+    #     qwen3.5:9b-q4_K_M   268     225  629  1323       0      0
+    #     qwen3:8b-q4_K_M     324     258  578  2126       1      0
     #
-    # Accuracy was identical at 1024, so the old cap was not costing answers
-    # -- but 2 of 100 items across the roster finished on `length` at exactly
-    # 1024, i.e. graded on a sentence the model never ended. 2048 is ~1.5x the
-    # observed maximum: it clears that truncation and still bounds the task.
+    # The ceiling is 2126, so 2048 was short by 78 tokens on a single item --
+    # 1 in 100 across the roster finished on `length`, graded on a sentence
+    # the model never ended. 4096 is ~1.9x the measured maximum and nothing
+    # across 50 swept items came near it.
     #
-    # Bounding matters more here than elsewhere: ifeval carries NO stop
-    # sequence (`stop` is empty below, unlike gsm8k's "\nQuestion:"), so this
-    # cap is the only thing standing between a rambling model and the context
-    # window. An 8192 cap would be an 8x worst case bought for nothing.
-    default_max_tokens = 2048
+    # Still capped rather than opened to 8192/16384 like the reference-wave
+    # tasks: ifeval carries NO stop sequence (`stop` is empty below, unlike
+    # gsm8k's "\nQuestion:"), so this cap is the only thing standing between a
+    # rambling model and the context window, and measured demand does not
+    # justify the wider window. energy-bench does not include ifeval in its
+    # waves, so there is no lab figure to match either.
+    default_max_tokens = 4096
     description = "Instruction-following with programmatic verification (no LLM judge)"
     revision = REVISION
 
