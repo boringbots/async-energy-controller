@@ -140,6 +140,7 @@ __all__ = [
     "QUICK_REFERENCE_SEED",
     "QUICK_TASKS",
     "THINKING_MODE_OFF",
+    "EFFORT_LADDER_MODELS",
     "THINKING_MODE_OFF_OLLAMA",
     "THINKING_MODE_ON",
     "THINKING_OFF_CHAT_TEMPLATE_KWARGS_LLAMACPP",
@@ -470,7 +471,7 @@ async def run_quick_task(
     task = load_task(task_name)
     max_tokens = task.default_max_tokens
     # Pinned, never left to the model: see THINKING_OFF_CHAT_TEMPLATE_KWARGS.
-    chat_template_kwargs = thinking_kwargs_for(engine_name, thinking)
+    chat_template_kwargs = thinking_kwargs_for(engine_name, thinking, model_name)
     items = task.load(n_items=n_items, n_shot=resolved_n_shot, seed=resolved_seed)
 
     run_id = f"quick-{task_name}-{power_limit_w or 'stock'}-{int(time.time() * 1000)}"
@@ -837,8 +838,44 @@ energy-bench's Ollama parity configs pin the same two kwargs, so the strings
 match and the rows share a public config key."""
 
 
-def thinking_kwargs_for(engine_name: str | None, thinking: bool) -> dict[str, object]:
-    """The chat_template_kwargs actually sent for this engine and axis.
+EFFORT_LADDER_MODELS: frozenset[str] = frozenset({"gpt-oss"})
+"""Models whose reasoning is a LADDER, not a switch.
+
+gpt-oss has no off. Measured against Ollama 0.34.2 on `gpt-oss:20b`, one
+prompt, `reasoning_effort` swept:
+
+    unset    105 reasoning chars      low       47
+    none     105 reasoning chars      medium   105
+                                      high     155
+
+`none` is not in the vocabulary, so it falls back to the default and is
+byte-identical to `medium` -- which means the generic thinking-off kwargs are
+a NO-OP here, and a row carrying them would claim thinking-off while having
+reasoned at medium. That is the mislabeling this whole axis exists to stop.
+
+energy-bench reached the same shape independently: its gpt-oss configs are
+`axis-*-effort-low-*` and `axis-*-effort-high-*`, whose headers read "the low
+rung of the reasoning_effort ladder; medium is the reference row". There is
+no `thinkoff-gpt-oss` config in its 522, while `thinkoff-qwen3-*` and
+`thinkoff-granite-*` both exist.
+
+So the OFF cell maps to the cheapest real rung (`low`) and the ON cell to
+`high`, and the recorded label says exactly that -- a gpt-oss row keys with
+the lab's own effort rungs instead of pooling with genuinely-off rows from
+models that have an off.
+"""
+
+
+def _is_effort_ladder_model(model_tag: str | None) -> bool:
+    if not model_tag:
+        return False
+    return any(model_tag.startswith(m) for m in EFFORT_LADDER_MODELS)
+
+
+def thinking_kwargs_for(
+    engine_name: str | None, thinking: bool, model_tag: str | None = None
+) -> dict[str, object]:
+    """The chat_template_kwargs actually sent for this engine, model and axis.
 
     Per engine because the two servers read different keys: llama-server
     honours `enable_thinking`, Ollama's OpenAI endpoint ignores it (and a
@@ -846,7 +883,12 @@ def thinking_kwargs_for(engine_name: str | None, thinking: bool) -> dict[str, ob
     extra key to llama-server would be inert on the wire but would change
     the recorded label away from the lab anchor's, so each engine gets
     exactly what it needs and the label describes exactly that.
+
+    Per model for the effort-ladder families, which have no off at all --
+    see `EFFORT_LADDER_MODELS` for the measurement.
     """
+    if _is_effort_ladder_model(model_tag):
+        return {"reasoning_effort": "high" if thinking else "low"}
     if thinking:
         return dict(THINKING_ON_CHAT_TEMPLATE_KWARGS)
     if engine_name == "ollama":
