@@ -35,15 +35,16 @@ recording only "Q4_K_M" normalizes silently against whichever build it
 happened to serve. So this mode verifies the weights before it measures, and
 refuses rather than produce a confidently-wrong anchor.
 
-## What is deliberately NOT pinned here
+## Output cap
 
-`REFERENCE_CONFIG` pins no output cap. `docs/reference-wave.md` names that as
-a real gap in the corpus -- 400/512/1024 caps were "never chosen and never
-written down" -- and argues a reference point should run uncapped to EOS. That
-change is the lab's to make, not this package's, so this mode uses the task's
-own default cap and RECORDS it on the row (`max_tokens`), leaving a consumer
-free to group by it. With thinking off the measured cost is ~241 tok/item, so
-the cap is not binding in practice.
+`REFERENCE_CONFIG` pins no output cap; the lab's stored anchor row ran at 400
+(an August default that was never chosen) while the lab's September reference
+wave settled on 8192 for gsm8k_platinum. This mode uses the task default,
+which since 2026-09-20 IS that reference-wave figure (`tasks/gsm8k_platinum.py`),
+and RECORDS it on the row (`max_tokens`, a leaderboard grouping key). With
+thinking off the measured cost is ~241 tok/item, so the cap is not binding in
+practice; it exists so a community anchor shares a config key with the lab's
+reference-wave rows rather than with the 400-capped August anchor.
 """
 
 from __future__ import annotations

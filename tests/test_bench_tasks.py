@@ -343,7 +343,7 @@ class TestMMLUScoring:
 class TestExtractLetterAnswer:
     """The shared MC extractor (tasks/base.py), used by all four letter tasks.
 
-    default_max_tokens is 512 (not a tiny answer-only cap), so completions
+    default_max_tokens is at least 512 (not a tiny answer-only cap), so completions
     can be whole reasoning traces rather than a single token — these pin both
     shapes: answer-first-then-aside, and reason-then-conclude.
     """
@@ -381,12 +381,27 @@ class TestExtractLetterAnswer:
 
 class TestMCTasksShareTheRaisedCap:
     def test_letter_tasks_allow_room_to_reason(self) -> None:
-        """8 tokens scored a reasoning model 0% on every item.
-
-        512 is measured to fit every context window in the roster.
-        """
+        """8 tokens scored a reasoning model 0% on every item; every letter
+        task leaves at least the 512 that was measured to fit every context
+        window in the roster."""
         for cls in (MMLUTask, MMLUReduxTask, GPQADiamondTask, HellaSwagTask):
-            assert cls.default_max_tokens == 512, cls.__name__
+            assert cls.default_max_tokens >= 512, cls.__name__
+
+
+class TestSharedTasksMatchTheLabReferenceWaveCaps:
+    def test_caps_equal_energy_bench_reference_wave(self) -> None:
+        """energy-bench's September 2026 reference wave settled on these caps
+        (scripts/make_reference_wave.py::CAPS). max_tokens is a public
+        leaderboard grouping key, so a community row shares a config key
+        with the lab's reference rows only if the cap matches exactly; the
+        August 400/512/1024 ladders are deliberately NOT matched."""
+        from hmasync_controller.bench.tasks.gsm8k_platinum import GSM8KPlatinumTask
+        from hmasync_controller.bench.tasks.math500 import Math500Task
+
+        assert GSM8KPlatinumTask.default_max_tokens == 8192
+        assert MMLUReduxTask.default_max_tokens == 8192
+        assert Math500Task.default_max_tokens == 16384
+        assert GPQADiamondTask.default_max_tokens == 16384
 
 
 class TestMMLUReduxScoring:

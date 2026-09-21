@@ -43,7 +43,13 @@ class GSM8KPlatinumTask(Task):
 
     name = "gsm8k_platinum"
     shape = "decode"
-    default_max_tokens = 2048
+    # energy-bench's September 2026 reference-wave cap for this task
+    # (scripts/make_reference_wave.py::CAPS). Matching it lets a community
+    # row share a public config key with the lab's reference rows -- max_tokens
+    # is a leaderboard grouping key -- while the August 400/512/1024 ladders
+    # stay their own configs. Effectively open (thinking-off runs use ~240
+    # tok/item on gsm8k), so the cap records intent rather than binding.
+    default_max_tokens = 8192
     description = "Cleaned/re-labeled GSM8K test set (chain-of-thought, decode-heavy)"
     # Without these the model answers, then invents its own follow-up questions
     # until max_tokens — measured at ~4x the necessary tokens on some items.

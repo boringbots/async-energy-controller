@@ -81,7 +81,13 @@ class GPQADiamondTask(Task):
 
     name = "gpqa_diamond"
     shape = "prefill"
-    default_max_tokens = 512
+    # energy-bench's September 2026 reference-wave cap for this task
+    # (scripts/make_reference_wave.py::CAPS). Matching it lets a community
+    # row share a public config key with the lab's reference rows -- max_tokens
+    # is a leaderboard grouping key -- while the August 400/512/1024 ladders
+    # stay their own configs. Effectively open (thinking-off runs use ~240
+    # tok/item on gsm8k), so the cap records intent rather than binding.
+    default_max_tokens = 16384
     description = "Graduate-level science QA, zero-shot, letter-answer (gated dataset)"
     stop = ["\nQuestion:"]
     revision = REVISION
