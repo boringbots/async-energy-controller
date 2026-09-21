@@ -115,16 +115,14 @@ class TestTierCli:
         args = cli._parse_args(["bench", tier])
         assert args.bench_subcommand == tier
         assert args.timeout is None
-        assert args.thinking is None
+        # No --thinking on the multi-model tiers: they pin it off.
+        assert not hasattr(args, "thinking")
 
     def test_tier_backstops_are_sized_for_the_work(self):
-        """Note the inversion: medium's backstop is the LARGER one. Sweeping
-        the thinking axis across 4 models (~20 h, the ON half being ~9x the
-        wall clock of the OFF half) costs more than running 7 models once on
-        the reference-wave tasks (~13 h). Cost here tracks the axis count,
-        not the tier's name."""
-        assert cli.BENCH_MEDIUM_TIMEOUT_S > cli.BENCH_FULL_TIMEOUT_S
-        assert cli.BENCH_FULL_TIMEOUT_S > cli.BENCH_QUICK_TIMEOUT_S
+        """With the thinking sweep gone, cost tracks breadth again and the
+        backstops order the way the names imply."""
+        assert cli.BENCH_FULL_TIMEOUT_S > cli.BENCH_MEDIUM_TIMEOUT_S
+        assert cli.BENCH_MEDIUM_TIMEOUT_S > cli.BENCH_QUICK_TIMEOUT_S
 
     def test_the_schema_accepts_the_new_suites(self):
         import json
@@ -244,8 +242,12 @@ class TestTierShapeAfterTheSwap:
         assert "ifeval" not in dict(FULL_TASKS)
 
 
-class TestThinkingAxisMovedToMedium:
-    def test_medium_sweeps_both_rungs_when_nothing_is_pinned(self, tmp_path, monkeypatch):
+class TestNeitherTierSweepsThinking:
+    """The axis is real but already measured: energy-bench has 48 paired
+    configs across nine models (~9x energy, decisive on one task in four).
+    Re-deriving it here would multiply every multi-model run by that factor."""
+
+    def _axis_for(self, tier, monkeypatch, pin=None):
         seen = {}
 
         def fake(**kw):
@@ -255,40 +257,28 @@ class TestThinkingAxisMovedToMedium:
         monkeypatch.setattr(cli, "run_tier_suite", fake)
         monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
         try:
-            cli.run_bench_tier(cli.Settings(), "medium", thinking=None)
+            cli.run_bench_tier(cli.Settings(), tier, thinking=pin)
         except Exception:
             pass
-        assert seen["axis"] == (False, True)
+        return seen["axis"]
 
-    def test_an_explicit_flag_pins_one_rung(self, tmp_path, monkeypatch):
-        seen = {}
+    def test_both_tiers_pin_thinking_off(self, monkeypatch):
+        assert self._axis_for("medium", monkeypatch) == (False,)
+        assert self._axis_for("full", monkeypatch) == (False,)
 
-        def fake(**kw):
-            seen["axis"] = kw.get("thinking_axis")
-            raise RuntimeError("stop here")
+    def test_no_pin_can_turn_a_tier_into_a_sweep(self, monkeypatch):
+        for tier in ("medium", "full"):
+            for pin in (None, True, False):
+                assert self._axis_for(tier, monkeypatch, pin) == (False,), (tier, pin)
 
-        monkeypatch.setattr(cli, "run_tier_suite", fake)
-        monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
-        try:
-            cli.run_bench_tier(cli.Settings(), "medium", thinking=True)
-        except Exception:
-            pass
-        assert seen["axis"] == (True,)
+    def test_the_tiers_expose_no_thinking_flag(self):
+        for tier in ("medium", "full"):
+            with pytest.raises(SystemExit):
+                cli._parse_args(["bench", tier, "--thinking"])
 
-    def test_full_always_pins_thinking_off(self, tmp_path, monkeypatch):
-        """Sweeping the axis across every model would multiply a 13-hour run
-        by thinking's ~9x cost on reasoning tasks."""
-        seen = {}
+    def test_one_model_at_a_time_can_still_reach_the_axis(self):
+        """`bench quick --thinking` is the affordable way to look."""
+        assert cli._parse_args(["bench", "quick", "--thinking"]).thinking is True
 
-        def fake(**kw):
-            seen["axis"] = kw.get("thinking_axis")
-            raise RuntimeError("stop here")
-
-        monkeypatch.setattr(cli, "run_tier_suite", fake)
-        monkeypatch.setattr(cli, "_merge_tier_results", lambda c: c)
-        for pin in (None, True, False):
-            try:
-                cli.run_bench_tier(cli.Settings(), "full", thinking=pin)
-            except Exception:
-                pass
-            assert seen["axis"] == (False,), pin
+    def test_medium_backstop_is_sized_for_a_single_pass(self):
+        assert cli.BENCH_MEDIUM_TIMEOUT_S == 4 * 60 * 60.0

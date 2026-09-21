@@ -545,7 +545,7 @@ trace's first paragraph break.
 |---|---|---|---|
 | `bench calibrate` | scheduling figures, fast | 1 | ~5 min |
 | `bench quick` | this box on a known workload | 1 | ~30 min |
-| `bench medium` | which model runs best here, **and at which thinking setting** | 4 × 2 | ~20 h (~2 h with `--thinking` pinning one rung) |
+| `bench medium` | **which model runs best here** | 4 | ~2 h |
 | `bench full` | **every model this box can serve**, on the lab's own tasks | all that fit | ~13 h |
 | `bench reference` | **the Efficiency Index anchor** | 1 | ~1 h |
 
@@ -557,10 +557,14 @@ than suggested.
 
 The two answer different questions, and the cost does not follow the names:
 
-- **`medium` — depth.** The 4 largest models that fit, on the three quick
-  tasks, with thinking swept off *and* on. The ON half is ~9x the wall clock
-  of the OFF half, which is what makes this the more expensive tier. Pass
-  `--thinking` to pin one rung and get the ~2 h version.
+- **`medium` — a fast read.** The 4 largest models that fit, on the three
+  quick tasks, thinking pinned off. ~2 h.
+
+Neither multi-model tier sweeps the thinking axis, and neither takes
+`--thinking`. The axis is real — energy-bench measured it at 48 paired
+configs across nine models: ~9x the energy, decisive on one task in four —
+but re-deriving a published result would multiply every run by that factor.
+`bench quick --thinking` reaches it on one model if you want to look.
 - **`full` — breadth.** Every model this box can serve, on the lab's
   reference-wave tasks at the lab's item counts (`gsm8k_platinum` x100,
   `mmlu_redux` x100, `math500` x50), thinking pinned off. Every row it

@@ -966,11 +966,8 @@ BENCH_REFERENCE_TIMEOUT_S = 3 * 60 * 60.0
 measured on an M3 with thinking off is ~66 min, so this is ~2.5x headroom for
 a slower box. Scaled again on Apple Silicon like every other backstop."""
 
-BENCH_MEDIUM_TIMEOUT_S = 40 * 60 * 60.0
-"""Backstop for medium, which now sweeps the thinking axis across four
-models (it absorbed the old `full`). The OFF half is ~2 h measured; the ON
-half is the expensive one, since thinking costs ~9x the wall clock on the
-same items -- so the target is ~20 h and this is 2x headroom over it."""
+BENCH_MEDIUM_TIMEOUT_S = 4 * 60 * 60.0
+"""Backstop for the 4-model medium tier: ~2 h measured, 2x headroom."""
 
 BENCH_FULL_TIMEOUT_S = 30 * 60 * 60.0
 """Backstop for full: every model this box can serve, on the reference-wave
@@ -1319,9 +1316,8 @@ def run_bench_tier(
 ) -> tuple[int, str]:
     """Run a multi-model tier and bundle every cell it measured.
 
-    `medium` sweeps the thinking axis by default (it absorbed the old `full`);
-    an explicit `--thinking` there pins one rung instead of sweeping both.
-    `full` always pins thinking off -- see the comment on `axis` below.
+    Both tiers pin thinking off -- see the comment on `axis` below for why
+    neither sweeps it.
     """
     timeout_s = _resolve_bench_timeout_s(
         timeout_s,
@@ -1335,12 +1331,14 @@ def run_bench_tier(
     # reference-wave tasks -- and pins thinking off, because sweeping the axis
     # across seven models would multiply a 13-hour run by the ~9x thinking
     # costs on reasoning tasks and put it beyond any single sitting.
-    if tier == "full":
-        axis = (False,)
-    elif thinking is None:
-        axis = (False, True)
-    else:
-        axis = (bool(thinking),)
+    # Both multi-model tiers pin thinking OFF, and neither sweeps it. The
+    # axis is real but it is not this package's to re-derive: energy-bench
+    # measured it at 48 paired configs across nine models and three nodes
+    # (~9x the energy, decisive on one task in four), and sweeping it here
+    # would multiply every multi-model run by that factor to confirm a
+    # published result. `bench quick --thinking` still reaches it on one
+    # model for anyone who wants to look.
+    axis = (False,)
     return _run_bench_suite_cli(
         settings,
         _merge_tier_results(
@@ -1585,13 +1583,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "medium",
         help=(
             "The 4 largest roster models this box can serve, on the three "
-            "quick tasks, with the thinking axis swept off AND on (pass "
-            "--thinking to pin one rung instead). ~20 hours with the sweep, "
-            "~2 without. Use `bench full` for breadth across models."
+            "quick tasks, thinking pinned off. ~2 hours. Use `bench full` for "
+            "every model the box can serve, on the lab's own tasks."
         ),
     )
     _add_bench_timeout_arg(bench_medium, "medium", BENCH_MEDIUM_TIMEOUT_S)
-    _add_bench_thinking_arg(bench_medium)
     bench_full = bench_sub.add_parser(
         "full",
         help=(
@@ -1603,7 +1599,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_full, "full", BENCH_FULL_TIMEOUT_S)
-    _add_bench_thinking_arg(bench_full)
     bench_reference = bench_sub.add_parser(
         "reference",
         help=(
@@ -1686,15 +1681,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.timeout,
                     None,
                     BENCH_MEDIUM_TIMEOUT_S if bench_sub == "medium" else BENCH_FULL_TIMEOUT_S,
-                ),
-                # None is meaningful here and must survive: for `medium` it
-                # means "sweep both rungs" (the behaviour it absorbed from the
-                # old `full`), while an explicit flag or a BENCH_THINKING of
-                # true pins one. `full` ignores it and pins off either way.
-                thinking=(
-                    args.thinking
-                    if args.thinking is not None
-                    else (True if settings.BENCH_THINKING else None)
                 ),
             )
         elif bench_sub == "submit":
