@@ -140,7 +140,11 @@ __all__ = [
     "QUICK_REFERENCE_SEED",
     "QUICK_TASKS",
     "THINKING_MODE_OFF",
+    "THINKING_MODE_OFF_OLLAMA",
     "THINKING_MODE_ON",
+    "THINKING_OFF_CHAT_TEMPLATE_KWARGS_LLAMACPP",
+    "thinking_kwargs_for",
+    "thinking_mode_label",
     "THINKING_OFF_CHAT_TEMPLATE_KWARGS",
     "THINKING_ON_CHAT_TEMPLATE_KWARGS",
     "QuickError",
@@ -448,6 +452,7 @@ async def run_quick_task(
     n_shot: int | None = None,
     seed: int | None = None,
     thinking: bool = False,
+    engine_name: str | None = None,
 ) -> QuickTaskRun:
     """Load a task, sample telemetry across it, score every item.
 
@@ -465,9 +470,7 @@ async def run_quick_task(
     task = load_task(task_name)
     max_tokens = task.default_max_tokens
     # Pinned, never left to the model: see THINKING_OFF_CHAT_TEMPLATE_KWARGS.
-    chat_template_kwargs = dict(
-        THINKING_ON_CHAT_TEMPLATE_KWARGS if thinking else THINKING_OFF_CHAT_TEMPLATE_KWARGS
-    )
+    chat_template_kwargs = thinking_kwargs_for(engine_name, thinking)
     items = task.load(n_items=n_items, n_shot=resolved_n_shot, seed=resolved_seed)
 
     run_id = f"quick-{task_name}-{power_limit_w or 'stock'}-{int(time.time() * 1000)}"
@@ -521,7 +524,7 @@ async def run_quick_task(
         n_shot=resolved_n_shot,
         seed=resolved_seed,
         max_tokens=max_tokens,
-        thinking_mode=THINKING_MODE_ON if thinking else THINKING_MODE_OFF,
+        thinking_mode=thinking_mode_label(chat_template_kwargs),
         power_limit_w=power_limit_w,
         inference_results=inference_results,
         telemetry_samples=telemetry_samples,
@@ -586,6 +589,7 @@ async def run_power_sweep(
     seed: int | None = None,
     caps_w: list[int] | None = None,
     max_points: int | None = None,
+    engine_name: str | None = None,
 ) -> tuple[list[PowerSweepPoint], str | None]:
     """Run the mini power sweep's capped points (stock is the baseline pass's
     own `POWER_SWEEP_TASK` run -- not repeated here).
@@ -691,6 +695,7 @@ async def run_power_sweep(
             power_limit_w=confirmed,
             n_shot=n_shot,
             seed=seed,
+            engine_name=engine_name,
         )
         points.append(PowerSweepPoint(requested_w=watts, confirmed_w=confirmed, run=run))
 
@@ -816,6 +821,52 @@ pinned the axis, which is the state these constants exist to end."""
 
 THINKING_MODE_ON = "enable_thinking=true"
 """`RunMetrics.thinking_mode` for a pinned thinking-on run."""
+
+THINKING_OFF_CHAT_TEMPLATE_KWARGS_LLAMACPP: dict[str, object] = {"enable_thinking": False}
+"""What "thinking off" is on the wire for llama-server, which honours
+`chat_template_kwargs.enable_thinking` (energy-bench verified this on the
+reference GGUF: 159 completion tokens with thinking on, 2 with it off). No
+`reasoning_effort` here, so the recorded label is exactly the lab anchor's
+`enable_thinking=false` and a `bench reference` row keys with it."""
+
+THINKING_MODE_OFF_OLLAMA = "enable_thinking=false,reasoning_effort=none"
+"""`RunMetrics.thinking_mode` for a pinned thinking-off run on Ollama: the
+serialization of BOTH keys sent, because Ollama honours only the second and
+a label that named just the first would describe a knob that did nothing.
+energy-bench's Ollama parity configs pin the same two kwargs, so the strings
+match and the rows share a public config key."""
+
+
+def thinking_kwargs_for(engine_name: str | None, thinking: bool) -> dict[str, object]:
+    """The chat_template_kwargs actually sent for this engine and axis.
+
+    Per engine because the two servers read different keys: llama-server
+    honours `enable_thinking`, Ollama's OpenAI endpoint ignores it (and a
+    top-level `think`) and honours only `reasoning_effort`. Sending Ollama's
+    extra key to llama-server would be inert on the wire but would change
+    the recorded label away from the lab anchor's, so each engine gets
+    exactly what it needs and the label describes exactly that.
+    """
+    if thinking:
+        return dict(THINKING_ON_CHAT_TEMPLATE_KWARGS)
+    if engine_name == "ollama":
+        return dict(THINKING_OFF_CHAT_TEMPLATE_KWARGS)
+    return dict(THINKING_OFF_CHAT_TEMPLATE_KWARGS_LLAMACPP)
+
+
+def thinking_mode_label(chat_template_kwargs: dict[str, object] | None) -> str | None:
+    """`RunMetrics.thinking_mode` from the kwargs that were sent -- the same
+    `key=value,key=value` serialization energy-bench's runner writes
+    (`orchestrator.runner._serialize_thinking_mode`), so a controller row and
+    a lab row that sent the same kwargs carry the same string and group
+    together. None when nothing was sent (nobody pinned the axis)."""
+    if not chat_template_kwargs:
+        return None
+    parts = []
+    for key, value in chat_template_kwargs.items():
+        value_str = "true" if value is True else "false" if value is False else str(value)
+        parts.append(f"{key}={value_str}")
+    return ",".join(parts)
 
 TRUNCATION_WARN_FRACTION = 0.2
 """Warn once a task's truncated share reaches this. Some truncation is
@@ -1021,6 +1072,7 @@ async def _run_bench_suite(
                     task_name,
                     n_items,
                     thinking=thinking,
+                    engine_name=detected.name,
                 )
             except Exception as e:  # noqa: BLE001 - one failed task must not sink the suite
                 logger.warning("  %s failed: %s", task_name, e)
@@ -1078,6 +1130,7 @@ async def _run_bench_suite(
                     n_shot=gsm8k_baseline.n_shot,
                     seed=gsm8k_baseline.seed,
                     max_points=max_sweep_points,
+                    engine_name=detected.name,
                 )
             except Exception as e:  # noqa: BLE001 - a sweep failure must not sink the suite
                 skipped_reason = f"power sweep aborted: {e}"

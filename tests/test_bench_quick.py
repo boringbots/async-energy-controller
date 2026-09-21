@@ -877,6 +877,9 @@ class TestRunQuickSuite:
             return model
 
         async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+
+            kw.pop("engine_name", None)  # the suite passes the engine for the thinking label
+
             return _fake_task_run(task_name, n_items, **kw)
 
         with (
@@ -920,6 +923,9 @@ class TestRunQuickSuite:
             return model
 
         async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+
+            kw.pop("engine_name", None)  # the suite passes the engine for the thinking label
+
             return _fake_task_run(task_name, n_items, **kw)
 
         with (
@@ -983,6 +989,9 @@ class TestRunCalibrateSuite:
             return model
 
         async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+
+            kw.pop("engine_name", None)  # the suite passes the engine for the thinking label
+
             return _fake_task_run(task_name, n_items, **kw)
 
         with (
@@ -1019,6 +1028,9 @@ class TestRunCalibrateSuite:
             return model
 
         async def _fake_run_quick_task(vllm_client, telemetry_arg, model_name, task_name, n_items, **kw):
+
+            kw.pop("engine_name", None)  # the suite passes the engine for the thinking label
+
             return _fake_task_run(task_name, n_items, **kw)
 
         with (
