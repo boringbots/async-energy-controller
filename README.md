@@ -555,10 +555,20 @@ They never pull: a model that is not present is reported with the exact
 `ollama pull` and its size, and one too large for the box is skipped rather
 than suggested.
 
+The roster is the most-pulled models on energy-bench's measured
+accuracy-vs-energy frontier, largest first: `qwen3-coder:30b-a3b-q4_K_M`,
+`gemma4:26b-a4b-it-q4_K_M`, `gpt-oss:20b`, `qwen3.5:9b-q4_K_M`, `qwen3:8b-q4_K_M`,
+`llama3.1:8b-instruct-q4_K_M`, `qwen2.5:7b-instruct-q4_K_M`, `qwen3.5:4b-q4_K_M`,
+`qwen3.5:2b-q4_K_M`. A tier measures the four largest that fit your card, so a
+24 GB box gets the three MoEs and Qwen3.5-9B while a 12 GB box gets the four
+dense models from Qwen3.5-9B down.
+
 ```bash
 async-energy-controller bench medium
+#   roster: qwen3-coder:30b-a3b-q4_K_M   pulled   -> measure
+#   roster: gemma4:26b-a4b-it-q4_K_M     MISSING  -> ollama pull gemma4:26b-a4b-it-q4_K_M  (18.0 GB)
+#   roster: gpt-oss:20b                  pulled   -> measure
 #   roster: qwen3.5:9b-q4_K_M            pulled   -> measure
-#   roster: llama3.1:8b-instruct-q4_K_M  MISSING  -> ollama pull llama3.1:8b-instruct-q4_K_M  (4.9 GB)
 ```
 
 ### The anchor — `bench reference`

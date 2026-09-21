@@ -6,6 +6,7 @@ import pytest
 
 from hmasync_controller import cli
 from hmasync_controller.bench.roster import (
+    REFERENCE_ENTRY,
     ROSTER,
     REFERENCE_TAG,
     TIER_MODEL_COUNTS,
@@ -34,10 +35,22 @@ class TestRosterPins:
             assert ":" in e.tag, e.tag
             assert e.tag.split(":")[1] != "latest", e.tag
 
-    def test_roster_head_is_the_quick_reference(self):
+    def test_quick_reference_is_in_the_roster(self):
         """The tiers must be a superset of quick, not a second list that can
-        drift from it."""
+        drift from it. The reference is no longer the roster's HEAD: the
+        three frontier MoEs above it do not fit the card quick is sized for."""
         assert REFERENCE_TAG == QUICK_REFERENCE_MODELS["ollama"]["tag"]
+        assert REFERENCE_TAG in {e.tag for e in ROSTER}
+        assert roster_for_tier("quick") == (REFERENCE_ENTRY,)
+        assert REFERENCE_ENTRY.hf_id == "Qwen/Qwen3.5-9B"
+
+    def test_roster_head_is_the_measured_frontier(self):
+        """energy-bench's fleet frontier (2026-09-20): the three MoEs own it
+        on gsm8k/math500/gpqa, Qwen2.5-7B Q4_K_M owns the cheap end."""
+        tags = [e.tag for e in ROSTER]
+        assert tags[:3] == ["qwen3-coder:30b-a3b-q4_K_M", "gemma4:26b-a4b-it-q4_K_M", "gpt-oss:20b"]
+        assert "qwen2.5:7b-instruct-q4_K_M" in tags
+        assert not any(t.startswith("mistral:") for t in tags)  # 0.45 on gsm8k, off the frontier
 
     def test_roster_is_ordered_largest_first(self):
         sizes = [e.size_gb for e in ROSTER]
@@ -53,6 +66,14 @@ class TestTierSelection:
         assert len(roster_for_tier("quick")) == 1
         assert len(roster_for_tier("medium")) == TIER_MODEL_COUNTS["medium"]
         assert roster_for_tier("medium")[0] == ROSTER[0]
+
+    def test_budget_is_applied_before_the_count(self):
+        """A 12 GB box still measures four models -- the four largest that
+        fit -- rather than an empty tier because the head is three MoEs."""
+        picked = roster_for_tier("medium", budget_gb=12.0)
+        assert len(picked) == TIER_MODEL_COUNTS["medium"]
+        assert all(e.size_gb <= 12.0 for e in picked)
+        assert picked[0].tag == "qwen3.5:9b-q4_K_M"
 
     def test_full_measures_the_medium_roster_not_more_models(self):
         """full spends its extra budget on the thinking axis (~9x energy,
@@ -74,6 +95,8 @@ class TestTierSelection:
         )
         assert all(e.size_gb <= 4.8 for e in present + missing)
         assert ROSTER[0] not in present + missing
+        # every model that fits is measured -- three here, not zero
+        assert present == [e for e in ROSTER if e.size_gb <= 4.8]
 
     def test_nothing_pulled_yields_an_empty_present_list(self):
         present, missing = select_roster("medium", available_tags=set())

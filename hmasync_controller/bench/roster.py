@@ -27,11 +27,31 @@ to energy-bench's own rows for the same base model.
 
 ## Why these models
 
-Every entry maps to a model energy-bench already measures on its fleet
-(`docs/MODEL-PINS.md`), so a community row has something to be compared
-against. The sizes span 1.9-6.6 GB deliberately: `select_roster` walks them
-largest-first and skips what will not fit, so an 8 GB box still measures the
-small end instead of failing outright.
+The most-pulled models that sit on energy-bench's measured accuracy-vs-energy
+frontier (fleet snapshots read 2026-09-20, stock power, best config per model):
+
+    gsm8k_platinum   Qwen2.5-7B Q4_K_M 0.90 @ 304 J/correct; Qwen3-Coder-30B-A3B
+                     0.97 @ 355; gpt-oss-20b 0.99 @ 472
+    mmlu_redux       Qwen2.5-7B Q4_K_M 0.71 @ 17; Qwen3-Coder-30B-A3B 0.79 @ 29;
+                     gemma-4-26B-A4B 0.84 @ 53; Qwen3.5-9B 0.86 @ 67
+    gpqa_diamond     Qwen3-Coder-30B-A3B 0.60 @ 47 (nothing else is close)
+    math500          Qwen3-Coder-30B-A3B 0.76 @ 1619; gpt-oss-20b 0.86 @ 2295
+
+So the head of the roster is the three MoE models that own the frontier, then
+the dense 7-9B class every box can hold, then the small end for 8 GB cards.
+Llama-3.1-8B is here for popularity alone -- the lab has never measured it --
+and Mistral-7B-v0.2 was dropped: 0.45 on gsm8k at ~1000 J/correct puts it far
+off the frontier. LFM2.5-1.2B is on the frontier but has no Ollama tag.
+
+`hf_id` join caveat: the lab's rows for the two AWQ-served MoEs are keyed by
+the quantizer's repo (`stelterlab/...-AWQ`, `cyankiwi/...-AWQ-4bit`), and its
+Ollama engine-wave rows by the bare tag (`gpt-oss:20b`). The FP16 ids below
+are the honest base-model identity; joining to those lab rows needs an alias
+on the lab side, not a lie here.
+
+gpt-oss-20b ships MXFP4 natively (no Q4_K_M exists); its thinking knob is
+`reasoning_effort`, and the thinking-off kwargs send `reasoning_effort: none`,
+which has been verified on Qwen3.5 under Ollama but NOT yet on gpt-oss.
 
 Verified live 2026-09-20 against registry.ollama.ai: every tag resolves and
 every digest below is that tag's current model layer.
@@ -42,6 +62,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 __all__ = [
+    "REFERENCE_ENTRY",
+    "REFERENCE_TAG",
     "ROSTER",
     "RosterEntry",
     "roster_for_tier",
@@ -81,11 +103,39 @@ class RosterEntry:
 # model a box can hold is the most interesting row it can contribute.
 ROSTER: tuple[RosterEntry, ...] = (
     RosterEntry(
+        tag="qwen3-coder:30b-a3b-q4_K_M",
+        hf_id="Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        quantization="Q4_K_M",
+        digest="sha256:1194192cf2a187eb02722edcc3f77b11d21f537048ce04b67ccf8ba78863006a",
+        size_gb=18.6,
+    ),
+    RosterEntry(
+        tag="gemma4:26b-a4b-it-q4_K_M",
+        hf_id="google/gemma-4-26B-A4B-it",
+        quantization="Q4_K_M",
+        digest="sha256:7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df",
+        size_gb=18.0,
+    ),
+    RosterEntry(
+        tag="gpt-oss:20b",
+        hf_id="openai/gpt-oss-20b",
+        quantization="mxfp4",
+        digest="sha256:e7b273f9636059a689e3ddcab3716e4f65abe0143ac978e46673ad0e52d09efb",
+        size_gb=13.8,
+    ),
+    RosterEntry(
         tag="qwen3.5:9b-q4_K_M",
         hf_id="Qwen/Qwen3.5-9B",
         quantization="Q4_K_M",
         digest="sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c",
         size_gb=6.6,
+    ),
+    RosterEntry(
+        tag="qwen3:8b-q4_K_M",
+        hf_id="Qwen/Qwen3-8B",
+        quantization="Q4_K_M",
+        digest="sha256:a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f",
+        size_gb=5.2,
     ),
     RosterEntry(
         tag="llama3.1:8b-instruct-q4_K_M",
@@ -102,13 +152,6 @@ ROSTER: tuple[RosterEntry, ...] = (
         size_gb=4.7,
     ),
     RosterEntry(
-        tag="mistral:7b-instruct-q4_K_M",
-        hf_id="mistralai/Mistral-7B-Instruct-v0.2",
-        quantization="Q4_K_M",
-        digest="sha256:faf975975644f275f00075e7cf79cd207642412560640cd1930afbab95fea25c",
-        size_gb=4.4,
-    ),
-    RosterEntry(
         tag="qwen3.5:4b-q4_K_M",
         hf_id="Qwen/Qwen3.5-4B",
         quantization="Q4_K_M",
@@ -123,10 +166,14 @@ ROSTER: tuple[RosterEntry, ...] = (
         size_gb=1.9,
     ),
 )
+REFERENCE_TAG = "qwen3.5:9b-q4_K_M"
+"""The one model `bench quick` measures -- the same tag quick.py pins. It sits
+inside the roster (so the tiers are a superset of quick) but is no longer its
+head: the roster is ordered largest-first and the three frontier MoEs above it
+do not fit the card `bench quick` is sized for."""
 
-REFERENCE_TAG = ROSTER[0].tag
-"""The one model `bench quick` measures -- the same tag quick.py pins, kept
-as the roster's head so the tiers form a superset rather than a second list."""
+REFERENCE_ENTRY: RosterEntry = next(e for e in ROSTER if e.tag == REFERENCE_TAG)
+
 
 TIER_MODEL_COUNTS: dict[str, int] = {
     "quick": 1,
@@ -142,14 +189,24 @@ than a fifth model of the same size class.
 """
 
 
-def roster_for_tier(tier: str) -> tuple[RosterEntry, ...]:
-    """The roster prefix a tier measures, largest model first.
+def roster_for_tier(tier: str, *, budget_gb: float | None = None) -> tuple[RosterEntry, ...]:
+    """The roster a tier measures: the N largest models that fit `budget_gb`
+    (every model when no budget is given), largest first. `quick` is always
+    exactly the reference entry.
+
+    Budget first, count second: the roster's head is three 14-19 GB MoEs, so
+    taking a prefix and THEN dropping what does not fit would hand a 12 GB
+    box an empty medium tier. The point of the tiers is "which model runs
+    best on MY box", which needs the biggest models this box can hold.
 
     Raises:
         KeyError: Unknown tier -- callers pass a validated CLI choice, so a
             miss here is a programming error rather than operator input.
     """
-    return ROSTER[: TIER_MODEL_COUNTS[tier]]
+    if tier == "quick":
+        return (REFERENCE_ENTRY,)
+    fitting = tuple(e for e in ROSTER if budget_gb is None or e.size_gb <= budget_gb)
+    return fitting[: TIER_MODEL_COUNTS[tier]]
 
 
 def select_roster(
@@ -164,13 +221,11 @@ def select_roster(
     to the operator -- the caller names the exact `ollama pull` for each miss
     rather than fetching several GB on someone's behalf.
 
-    `budget_gb` drops entries too large to serve before the pulled/missing
-    split, so a small box is told "too big for this machine" rather than
-    "go and pull 6.6 GB you cannot run".
+    `budget_gb` selects the tier's models BEFORE the pulled/missing split (see
+    `roster_for_tier`), so a small box is told "too big for this machine"
+    rather than "go and pull 18 GB you cannot run".
     """
-    wanted = roster_for_tier(tier)
-    if budget_gb is not None:
-        wanted = tuple(e for e in wanted if e.size_gb <= budget_gb)
+    wanted = roster_for_tier(tier, budget_gb=budget_gb)
     present = [e for e in wanted if e.tag in available_tags]
     missing = [e for e in wanted if e.tag not in available_tags]
     return present, missing
