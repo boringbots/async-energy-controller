@@ -33,7 +33,27 @@ class IFEvalTask(Task):
 
     name = "ifeval"
     shape = "decode"
-    default_max_tokens = 1024
+    # Measured, not copied. energy-bench's reference wave caps by MEASURED
+    # demand per task (8192 gsm8k/mmlu_redux, 16384 math500/gpqa_diamond) and
+    # does not include ifeval at all, so there is no lab figure to match and
+    # no comparability argument for borrowing 8192.
+    #
+    # Swept on qwen3.5:9b-q4_K_M, n=25, thinking off, cap opened to 8192 to
+    # see what the task actually wants:
+    #
+    #     mean 268   median 225   p90 629   MAX 1323
+    #     over 2048: 0      hit 8192: 0      accuracy 0.80
+    #
+    # Accuracy was identical at 1024, so the old cap was not costing answers
+    # -- but 2 of 100 items across the roster finished on `length` at exactly
+    # 1024, i.e. graded on a sentence the model never ended. 2048 is ~1.5x the
+    # observed maximum: it clears that truncation and still bounds the task.
+    #
+    # Bounding matters more here than elsewhere: ifeval carries NO stop
+    # sequence (`stop` is empty below, unlike gsm8k's "\nQuestion:"), so this
+    # cap is the only thing standing between a rambling model and the context
+    # window. An 8192 cap would be an 8x worst case bought for nothing.
+    default_max_tokens = 2048
     description = "Instruction-following with programmatic verification (no LLM judge)"
     revision = REVISION
 
