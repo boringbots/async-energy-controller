@@ -63,6 +63,7 @@ from dataclasses import dataclass
 
 __all__ = [
     "REFERENCE_ENTRY",
+    "detect_model_budget_gb",
     "REFERENCE_TAG",
     "ROSTER",
     "RosterEntry",
@@ -187,6 +188,59 @@ thinking axis instead of more models: energy-bench's F3 found thinking worth
 ~9x the energy and decisive on one task in four, which is a bigger effect
 than a fifth model of the same size class.
 """
+
+
+def detect_model_budget_gb() -> float | None:
+    """How large a model this box can actually serve, in GB. None if unknown.
+
+    Exists because the roster is ordered largest-first and its head is now
+    three MoEs at 13.8-18.6 GB. Without a budget a small box is handed that
+    head, told to `ollama pull` ~37 GB of weights it can never serve, and
+    measures only whatever few of the tier happen to fit -- a partial tier
+    AND bad advice.
+
+    Two sources, because the honest number differs by platform:
+
+    - **NVIDIA**: NVML's total VRAM, via the sampler's own `gpu_info()`, so
+      this package keeps exactly one NVML path.
+    - **Apple Silicon**: there is no VRAM -- memory is unified, which is why
+      `gpu_mem_used_mib` is None on every Mac row. Metal's recommended
+      working set bounds a model and tracks ~75% of system RAM (Ollama
+      independently reports 17.8 GiB on this 24 GB M3, which is 74%). The
+      budget is 65%, not 75%, because the working set has to hold the KV
+      cache too: 75% of a 24 GB box is 19.3 GB, which would admit an 18.6 GB
+      model with 0.7 GB left for everything else and send the machine to
+      swap -- and a swapping run still reports a valid-looking number, just
+      a much worse one. 65% gives 16.7 GB here, which admits the 13.8 GB MoE
+      that measurably serves fine on this box and excludes the 18 GB pair
+      that cannot.
+
+    Returns None rather than guessing on anything else; an unknown budget
+    selects the plain tier prefix, the behaviour before this existed.
+    """
+    import platform
+    import subprocess
+
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+            return round(int(out.stdout.strip()) / 1e9 * 0.65, 1)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return None
+
+    try:
+        import asyncio
+
+        from hmasync_controller.bench.sampler import select_gpu_sampler
+
+        info = asyncio.run(select_gpu_sampler().gpu_info())
+        total_mib = info.get("gpu_mem_total_mib")
+        return round(float(total_mib) / 1024, 1) if total_mib else None
+    except Exception:  # noqa: BLE001 - a budget is an optimization, never a gate
+        return None
 
 
 def roster_for_tier(tier: str, *, budget_gb: float | None = None) -> tuple[RosterEntry, ...]:

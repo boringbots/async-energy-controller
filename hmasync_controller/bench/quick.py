@@ -108,7 +108,11 @@ from hmasync_controller.bench.sampler import (
     TelemetrySample,
     select_gpu_sampler,
 )
-from hmasync_controller.bench.roster import RosterEntry, select_roster
+from hmasync_controller.bench.roster import (
+    RosterEntry,
+    detect_model_budget_gb,
+    select_roster,
+)
 from hmasync_controller.bench.tasks import load_task
 from hmasync_controller.bench.thermal import (
     SustainedThermalThrottleError,
@@ -1341,6 +1345,13 @@ async def run_tier_suite(
         )
 
     available = await detected.adapter.list_models()
+    if budget_gb is None:
+        # Detect rather than default to "unlimited": the roster's head is
+        # three MoEs at 13.8-18.6 GB, so an undetected budget hands a small
+        # box models it cannot serve and tells it to download them.
+        budget_gb = detect_model_budget_gb()
+        if budget_gb is not None:
+            logger.info("  budget: %.1f GB servable on this box", budget_gb)
     present, missing = select_roster(tier, available_tags=available, budget_gb=budget_gb)
 
     for entry in present:

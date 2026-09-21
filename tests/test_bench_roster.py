@@ -128,3 +128,52 @@ class TestTierCli:
             ).read_text()
         )
         assert {"medium", "full"} <= set(schema["properties"]["suite"]["enum"])
+
+
+class TestBudgetDetection:
+    """The roster is ordered largest-first and its head is three MoEs at
+    13.8-18.6 GB. Without a budget a small box is handed that head, told to
+    pull ~37 GB it can never serve, and measures only the remainder."""
+
+    def test_apple_silicon_budgets_below_the_metal_working_set(self, monkeypatch):
+        import subprocess
+
+        from hmasync_controller.bench import roster as r
+
+        monkeypatch.setattr(r.platform if hasattr(r, "platform") else __import__("platform"),
+                            "system", lambda: "Darwin", raising=False)
+
+        class _Out:
+            stdout = str(24 * 10**9)
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Out())
+        with monkeypatch.context() as m:
+            m.setattr("platform.system", lambda: "Darwin")
+            m.setattr("platform.machine", lambda: "arm64")
+            budget = r.detect_model_budget_gb()
+
+        # Must leave room for the KV cache: Ollama reports a 17.8 GiB working
+        # set on a 24 GB box, and the weights are not the only thing in it.
+        assert budget is not None
+        assert budget < 17.8, "a budget at or above the working set admits models that swap"
+        assert budget > 13.8, "must still admit the MoE that measurably serves here"
+
+    def test_an_unknown_budget_is_none_not_a_guess(self, monkeypatch):
+        from hmasync_controller.bench import roster as r
+
+        with monkeypatch.context() as m:
+            m.setattr("platform.system", lambda: "Linux")
+            m.setattr("platform.machine", lambda: "x86_64")
+            m.setattr(
+                "hmasync_controller.bench.sampler.select_gpu_sampler",
+                lambda: (_ for _ in ()).throw(RuntimeError("no nvml")),
+            )
+            assert r.detect_model_budget_gb() is None
+
+    def test_a_budget_backfills_rather_than_shrinking_the_tier(self):
+        """Dropping two oversized models must not leave a 2-model medium --
+        the tier count is the promise, the specific models are not."""
+        all_tags = {e.tag for e in ROSTER}
+        present, missing = select_roster("medium", available_tags=all_tags, budget_gb=16.8)
+        assert len(present) == TIER_MODEL_COUNTS["medium"]
+        assert all(e.size_gb <= 16.8 for e in present)
