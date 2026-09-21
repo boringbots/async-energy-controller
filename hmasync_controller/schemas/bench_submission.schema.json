@@ -185,10 +185,7 @@
           "type": "number"
         },
         "max_tokens": {
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": ["integer", "null"]
         },
         "seed": {
           "type": "integer"
