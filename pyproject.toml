@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "async-energy-controller"
-version = "0.3.0"
+version = "0.4.0"
 description = "Async Energy on-box controller: executes optimizer schedules, profiles GPU energy, reports run records."
 requires-python = ">=3.12"
 license = "MIT"
