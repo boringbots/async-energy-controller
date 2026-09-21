@@ -65,6 +65,7 @@ from hmasync_controller.bench.quick import (
     detect_engine,
 )
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT
+from hmasync_controller.bench.roster import REFERENCE_ENTRY
 from hmasync_controller.bench.vllm_client import VLLMClient
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,9 @@ async def run_reference_suite(
     )
 
     return await _run_bench_suite(
+        # Weights verified above, so the row records the anchor's own join
+        # keys (Qwen/Qwen3.5-9B, Q4_K_M) instead of llama-server's `-m` alias.
+        entry=REFERENCE_ENTRY,
         engine_choice="llamacpp",
         host=host,
         ollama_port=ollama_port,

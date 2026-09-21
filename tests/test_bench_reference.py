@@ -157,3 +157,56 @@ class TestComparisonOutput:
 
         text = ref.format_reference_comparison(_Result())
         assert "compare the accuracy, not the joules" in text
+
+
+class TestAnchorRowIdentity:
+    """The anchor exists to be joined against the lab's row. It can only be
+    joined on the keys REFERENCE_CONFIG names."""
+
+    def test_verified_weights_record_the_hf_join_key_not_the_server_alias(self):
+        import asyncio
+
+        from unittest.mock import patch
+
+        from hmasync_controller.bench import quick as q
+        from hmasync_controller.bench.roster import REFERENCE_ENTRY
+
+        async def _get_models(self):
+            # llama-server reports whatever `-m` was given: often a local path.
+            return ["./ref/Qwen3.5-9B-Q4_K_M.gguf"]
+
+        class _Engine:
+            name = "llamacpp"
+            base_url = "http://localhost:8080"
+
+        with patch.object(q.VLLMClient, "get_models", _get_models):
+            model = asyncio.run(q.resolve_quick_model(_Engine(), REFERENCE_ENTRY))
+
+        # Recorded identity is the anchor's, not the alias.
+        assert model.record_model == "Qwen/Qwen3.5-9B"
+        assert model.record_quantization == "Q4_K_M"
+        assert "./ref/" not in model.record_model
+        # ... while the wire still addresses whatever the server calls it.
+        assert model.name == "./ref/Qwen3.5-9B-Q4_K_M.gguf"
+
+    def test_unverified_llamacpp_still_records_what_was_served(self):
+        """`bench quick` against llama.cpp measures whatever is loaded and has
+        no basis to claim an identity, so it keeps reporting the alias."""
+        import asyncio
+
+        from unittest.mock import patch
+
+        from hmasync_controller.bench import quick as q
+
+        async def _get_models(self):
+            return ["some-random-model.gguf"]
+
+        class _Engine:
+            name = "llamacpp"
+            base_url = "http://localhost:8080"
+
+        with patch.object(q.VLLMClient, "get_models", _get_models):
+            model = asyncio.run(q.resolve_quick_model(_Engine(), None))
+
+        assert model.record_model == "some-random-model.gguf"
+        assert model.record_quantization is None

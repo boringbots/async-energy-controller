@@ -409,6 +409,26 @@ async def resolve_quick_model(
             "model you already have) and re-run `bench quick`."
         )
     served = models[0]
+    if entry is not None:
+        # The caller VERIFIED which weights these are (`bench reference`
+        # refuses to measure anything else), so the row records the canonical
+        # identity rather than llama-server's alias. That alias is whatever
+        # `-m` was given -- often a local path like `./ref/model.gguf` -- which
+        # is not a join key, names nothing consistent across two machines, and
+        # puts one operator's directory layout on a public leaderboard.
+        #
+        # REFERENCE_CONFIG is explicit that `model` stays the FP16 HF repo id
+        # even when the reference is served quantized through llama.cpp: that
+        # is the convention the Efficiency Index joins on, so an anchor row
+        # recording anything else cannot be normalized against the lab's.
+        return QuickModel(
+            name=served,
+            note=f"llama.cpp: verified reference weights ({served})",
+            record_model=entry.hf_id,
+            record_quantization=entry.quantization,
+            record_gguf_repo=gguf_repo,
+            record_gguf_revision=gguf_revision,
+        )
     return QuickModel(
         name=served,
         note=f"llama.cpp: whatever was already loaded ({served})",
