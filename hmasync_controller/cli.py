@@ -57,6 +57,10 @@ from hmasync_controller.bench.apple_sampler import (
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
 from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
+from hmasync_controller.bench.prism import (
+    PrismWeightsUnknownError,
+    run_prism_suite,
+)
 from hmasync_controller.bench.reference import (
     ReferenceWeightsMismatchError,
     format_reference_comparison,
@@ -961,6 +965,12 @@ BENCH_CALIBRATE_TIMEOUT_S = 10 * 60.0
 """Backstop for the ~3-5 minute calibrate probe -- generous headroom over
 the target, not itself a target (same posture as BENCH_QUICK_TIMEOUT_S)."""
 
+BENCH_PRISM_TIMEOUT_S = 8 * 60 * 60.0
+"""Backstop for one prism rung: the same three tasks `full` runs, on one
+model. Generous because sub-4-bit kernels are new and their throughput is not
+something this package has measured across hardware -- a ternary 1.7B hit
+95 tok/s on an M3, but a 27B rung at one bit is uncharted."""
+
 BENCH_REFERENCE_TIMEOUT_S = 3 * 60 * 60.0
 """Backstop for the anchor: 100 gsm8k_platinum items at the ~39 s/item
 measured on an M3 with thinking off is ~66 min, so this is ~2.5x headroom for
@@ -1252,6 +1262,37 @@ def _add_bench_thinking_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+
+
+def run_bench_prism(
+    settings: Settings,
+    *,
+    submit_fn: Callable[[str, Settings], tuple[int, str]] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    timeout_s: float | None = None,
+) -> tuple[int, str]:
+    """Measure the Bonsai rung currently served, and bundle it as `prism`.
+
+    No `thinking` parameter: the rung is pinned off to match `full`, so a
+    Bonsai row and an Ollama row differ in the weights and nothing else.
+    Exit 2 for unrecognised weights -- an operator error with an exact
+    remedy, not a failure of this box.
+    """
+    timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_PRISM_TIMEOUT_S)
+    try:
+        return _run_bench_suite_cli(
+            settings,
+            run_prism_suite(
+                restore_to_factory_default=_bench_restore_to_factory_default(settings),
+                budget_s=timeout_s,
+            ),
+            suite="prism",
+            submit_fn=submit_fn,
+            now_fn=now_fn,
+            timeout_s=timeout_s,
+        )
+    except PrismWeightsUnknownError as e:
+        return 2, str(e)
 
 
 def run_bench_reference(
@@ -1610,6 +1651,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_reference, "reference", BENCH_REFERENCE_TIMEOUT_S)
+    bench_prism = bench_sub.add_parser(
+        "prism",
+        help=(
+            "Measure sub-4-bit weights: whichever pinned PrismML Bonsai rung "
+            "llama-server is currently serving, on the same tasks as `full`. "
+            "Ternary (~2.125 bits) and 1-bit quantizations of Qwen3 "
+            "checkpoints -- formats upstream llama.cpp cannot read. Needs the "
+            "PrismML fork; refuses weights it cannot name."
+        ),
+    )
+    _add_bench_timeout_arg(bench_prism, "prism", BENCH_PRISM_TIMEOUT_S)
     bench_submit = bench_sub.add_parser(
         "submit",
         help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
@@ -1662,6 +1714,14 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 thinking=(
                     settings.BENCH_THINKING if args.thinking is None else args.thinking
+                ),
+            )
+        elif bench_sub == "prism":
+            code, message = run_bench_prism(
+                settings,
+                submit_fn=_bench_submit_fn,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout, None, BENCH_PRISM_TIMEOUT_S
                 ),
             )
         elif bench_sub == "reference":
