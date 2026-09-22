@@ -23,8 +23,11 @@ class TestRosterPins:
         to pull -- the exact silent-normalization failure energy-bench added
         gguf_repo/gguf_revision to prevent."""
         for e in ROSTER:
-            assert e.digest.startswith("sha256:"), e.tag
-            assert len(e.digest) == 71, e.tag  # "sha256:" + 64 hex
+            # Bare hex, no "sha256:" prefix -- the exact shape `GET /api/tags`
+            # reports, because that is what model_digest compares against.
+            assert not e.digest.startswith("sha256:"), e.tag
+            assert len(e.digest) == 64, e.tag
+            assert all(c in "0123456789abcdef" for c in e.digest), e.tag
             assert e.hf_id.count("/") == 1, e.tag
             assert e.quantization
             assert e.size_gb > 0
@@ -282,3 +285,30 @@ class TestNeitherTierSweepsThinking:
 
     def test_medium_backstop_is_sized_for_a_single_pass(self):
         assert cli.BENCH_MEDIUM_TIMEOUT_S == 4 * 60 * 60.0
+
+
+class TestDigestsArePinnedInTheRuntimesOwnVocabulary:
+    """A pin that cannot match is not a pin.
+
+    `ollama pull` prints the model LAYER digest and `ollama list` prints the
+    MANIFEST digest; they are different numbers for one tag. The roster once
+    pinned the layer while `model_digest` reads the manifest, so every model
+    logged "resolved to X, roster pins Y -- recording what ran" and the check
+    validated nothing while looking like it worked."""
+
+    def test_digests_match_the_shape_model_digest_returns(self):
+        # OllamaAdapter.model_digest returns entry["digest"] from /api/tags
+        # verbatim, and Ollama reports that bare.
+        for e in ROSTER:
+            assert ":" not in e.digest, e.tag
+
+    def test_the_known_manifest_digests_are_recorded(self):
+        """Verified against registry.ollama.ai: sha256(manifest bytes) equals
+        what a local daemon reports for the same tag."""
+        expected = {
+            "qwen3.5:9b-q4_K_M": "6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7",
+            "gpt-oss:20b": "17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
+        }
+        by_tag = {e.tag: e.digest for e in ROSTER}
+        for tag, digest in expected.items():
+            assert by_tag[tag] == digest, tag

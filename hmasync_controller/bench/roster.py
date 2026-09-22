@@ -87,8 +87,20 @@ class RosterEntry:
     """Recorded verbatim on the row. Meaningless without `digest`."""
 
     digest: str
-    """Manifest digest of the model layer -- the weights identity. Two pulls
-    of one tag that differ here are different weights."""
+    """Ollama's MANIFEST digest for the tag, bare hex, no "sha256:" prefix.
+
+    Exactly what `GET /api/tags` reports and therefore what
+    `OllamaAdapter.model_digest` compares against -- and reproducible off the
+    registry, since it is the sha256 of the manifest bytes themselves
+    (verified against registry.ollama.ai for every entry below).
+
+    NOT the model layer's blob digest, which is a different number for the
+    same tag: `ollama pull` prints the layer ("pulling dec52a44569a...")
+    while `ollama list` shows the manifest ("6488c96fa5fa"). Pinning the
+    layer made every comparison mismatch, so the check warned on every model
+    and validated nothing. The manifest is also the better identity for a
+    benchmark: it covers the template and parameters, not just the weights,
+    and a changed template changes what was measured."""
 
     size_gb: float
     """Model layer size. Used only to skip models a box cannot hold; the real
@@ -107,63 +119,63 @@ ROSTER: tuple[RosterEntry, ...] = (
         tag="qwen3-coder:30b-a3b-q4_K_M",
         hf_id="Qwen/Qwen3-Coder-30B-A3B-Instruct",
         quantization="Q4_K_M",
-        digest="sha256:1194192cf2a187eb02722edcc3f77b11d21f537048ce04b67ccf8ba78863006a",
+        digest="06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca",
         size_gb=18.6,
     ),
     RosterEntry(
         tag="gemma4:26b-a4b-it-q4_K_M",
         hf_id="google/gemma-4-26B-A4B-it",
         quantization="Q4_K_M",
-        digest="sha256:7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df",
+        digest="5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
         size_gb=18.0,
     ),
     RosterEntry(
         tag="gpt-oss:20b",
         hf_id="openai/gpt-oss-20b",
         quantization="mxfp4",
-        digest="sha256:e7b273f9636059a689e3ddcab3716e4f65abe0143ac978e46673ad0e52d09efb",
+        digest="17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
         size_gb=13.8,
     ),
     RosterEntry(
         tag="qwen3.5:9b-q4_K_M",
         hf_id="Qwen/Qwen3.5-9B",
         quantization="Q4_K_M",
-        digest="sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c",
+        digest="6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7",
         size_gb=6.6,
     ),
     RosterEntry(
         tag="qwen3:8b-q4_K_M",
         hf_id="Qwen/Qwen3-8B",
         quantization="Q4_K_M",
-        digest="sha256:a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f",
+        digest="500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
         size_gb=5.2,
     ),
     RosterEntry(
         tag="llama3.1:8b-instruct-q4_K_M",
         hf_id="meta-llama/Llama-3.1-8B-Instruct",
         quantization="Q4_K_M",
-        digest="sha256:667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29",
+        digest="46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
         size_gb=4.9,
     ),
     RosterEntry(
         tag="qwen2.5:7b-instruct-q4_K_M",
         hf_id="Qwen/Qwen2.5-7B-Instruct",
         quantization="Q4_K_M",
-        digest="sha256:2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730",
+        digest="845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e",
         size_gb=4.7,
     ),
     RosterEntry(
         tag="qwen3.5:4b-q4_K_M",
         hf_id="Qwen/Qwen3.5-4B",
         quantization="Q4_K_M",
-        digest="sha256:81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490",
+        digest="2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
         size_gb=3.4,
     ),
     RosterEntry(
         tag="qwen3.5:2b-q4_K_M",
         hf_id="Qwen/Qwen3.5-2B",
         quantization="Q4_K_M",
-        digest="sha256:7a3a8d55382135a773916fd7c35044b2a2a3a7b8dee788095d70f122e6d8f520",
+        digest="124a03c347777e8e4e5955c33610ae01d9d90d8c2a718bfba069c498d5c7f3c9",
         size_gb=1.9,
     ),
 )
