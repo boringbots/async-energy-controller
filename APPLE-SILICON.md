@@ -71,6 +71,12 @@ low-memory machines. A suite that measures a different model on different
 hardware produces rows that cannot be compared, which defeats the point of
 having a reference at all.
 
+### A longer run worth the time
+
+[PRISM-MAC.md](PRISM-MAC.md) is a five-rung wave of sub-4-bit weights built
+for exactly this hardware — and the one measurement in this project that
+genuinely needs a second architecture rather than a second card.
+
 ---
 
 ## What you get, and what you do not

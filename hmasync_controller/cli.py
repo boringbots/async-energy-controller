@@ -57,6 +57,20 @@ from hmasync_controller.bench.apple_sampler import (
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
 from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
+from hmasync_controller.bench.prism import (
+    PRISM_CTX_SIZE,
+    PRISM_PORT,
+    PrismContextMismatchError,
+    PrismFtypeMismatchError,
+    PrismSuiteResult,
+    PrismWeightsMismatchError,
+    UnknownPrismRungError,
+    describe_wave,
+    format_rung_summary,
+    rung_keys,
+    run_prism_suite,
+    thinking_axis_note,
+)
 from hmasync_controller.bench.reference import (
     ReferenceWeightsMismatchError,
     format_reference_comparison,
@@ -966,6 +980,13 @@ BENCH_REFERENCE_TIMEOUT_S = 3 * 60 * 60.0
 measured on an M3 with thinking off is ~66 min, so this is ~2.5x headroom for
 a slower box. Scaled again on Apple Silicon like every other backstop."""
 
+BENCH_PRISM_TIMEOUT_S = 2 * 60 * 60.0
+"""Backstop for ONE prism rung (150 items, thinking off). An M3 measures
+~39 s/item on gsm8k_platinum and ~8 s/item on mmlu_redux for a 9B Q4_K_M, so
+a rung is roughly 45-60 min and this is ~2x headroom -- before the Apple
+multiplier below scales it again. The wave is five rungs, five invocations;
+this bounds each one, not the wave."""
+
 BENCH_MEDIUM_TIMEOUT_S = 4 * 60 * 60.0
 """Backstop for the 4-model medium tier (~2 h measured target, 2x headroom)."""
 
@@ -1035,6 +1056,79 @@ def _bench_quick_node_fingerprint(settings: Settings) -> dict[str, Any] | None:
         return None
 
 
+class _BenchSuiteAborted(Exception):
+    """A suite that could not produce a result, carrying the exit code and
+    the operator-facing message it should surface as.
+
+    A typed abort rather than a `(result, error)` tuple so the two call sites
+    below -- one that goes on to build a submission bundle, one that does not
+    -- cannot forget to check it.
+    """
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _await_bench_suite(suite_result_coro: Any, *, suite: str, timeout_s: float) -> Any:
+    """Await a suite under its backstop, mapping every "nothing was measured"
+    failure to the exit code and message the CLI reports.
+
+    Raises:
+        _BenchSuiteAborted: The suite produced no result.
+    """
+    try:
+        return asyncio.run(asyncio.wait_for(suite_result_coro, timeout=timeout_s))
+    except TimeoutError:
+        # Name the way out. The backstop firing usually means "this box is
+        # slower than the one the default was tuned on", not "this box is
+        # broken" -- and since no bundle is written, an operator who is not
+        # told to raise the budget simply loses the run again on every retry.
+        suggested_s = int(timeout_s * BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER)
+        raise _BenchSuiteAborted(1, (
+            f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written. "
+            f"The suite's item counts are fixed, so a slower box needs a longer budget rather "
+            f"than a shorter run: re-run as `async-energy-controller bench {suite} "
+            f"--timeout {suggested_s}`, or set BENCH_{suite.upper()}_TIMEOUT_S={suggested_s} "
+            f"in .env to make it the default for this box."
+        )) from None
+    except ModelNotAvailableError as e:
+        raise _BenchSuiteAborted(2, str(e)) from e
+    except (
+        NoEngineDetectedError,
+        NvmlUnavailableError,
+        # An arm64 Mac whose energy backend is missing or will not start.
+        # Handled beside the NVML case because it is the same class of
+        # failure -- this box cannot be measured -- and its message already
+        # says exactly what to install.
+        AppleEnergyUnavailableError,
+        AllTasksFailedError,
+    ) as e:
+        raise _BenchSuiteAborted(1, str(e)) from e
+
+
+def _write_bench_artifacts(settings: Settings, result: Any, *, suite: str) -> None:
+    """Write each measured run's telemetry/items folder. Best-effort by
+    design: an artifact-write failure must not lose the run's data from the
+    bundle the operator is about to submit -- only the raw, on-disk trace
+    copy is missing, which is a lesser loss."""
+    for run_metrics, task_run in zip(result.runs, result.task_runs, strict=True):
+        try:
+            write_run_artifact(
+                settings.BENCH_DATA_DIR,
+                run_metrics.run_id,
+                task_run.telemetry_samples,
+                task_run.inference_results,
+                run_metrics,
+            )
+        except ArtifactWriteError as e:
+            logger.warning(
+                "bench %s: could not write the artifact folder for %s: %s",
+                suite, run_metrics.run_id, e,
+            )
+
+
 def _run_bench_suite_cli(
     settings: Settings,
     suite_result_coro: Any,
@@ -1062,51 +1156,11 @@ def _run_bench_suite_cli(
     `ollama pull ...` command — this box never pulls a model itself).
     """
     try:
-        result = asyncio.run(asyncio.wait_for(suite_result_coro, timeout=timeout_s))
-    except TimeoutError:
-        # Name the way out. The backstop firing usually means "this box is
-        # slower than the one the default was tuned on", not "this box is
-        # broken" -- and since no bundle is written, an operator who is not
-        # told to raise the budget simply loses the run again on every retry.
-        suggested_s = int(timeout_s * BENCH_SLOW_HOST_TIMEOUT_MULTIPLIER)
-        return 1, (
-            f"bench {suite} did not finish within {int(timeout_s)}s; no bundle was written. "
-            f"The suite's item counts are fixed, so a slower box needs a longer budget rather "
-            f"than a shorter run: re-run as `async-energy-controller bench {suite} "
-            f"--timeout {suggested_s}`, or set BENCH_{suite.upper()}_TIMEOUT_S={suggested_s} "
-            f"in .env to make it the default for this box."
-        )
-    except ModelNotAvailableError as e:
-        return 2, str(e)
-    except (
-        NoEngineDetectedError,
-        NvmlUnavailableError,
-        # An arm64 Mac whose energy backend is missing or will not start.
-        # Handled beside the NVML case because it is the same class of
-        # failure -- this box cannot be measured -- and its message already
-        # says exactly what to install.
-        AppleEnergyUnavailableError,
-        AllTasksFailedError,
-    ) as e:
-        return 1, str(e)
+        result = _await_bench_suite(suite_result_coro, suite=suite, timeout_s=timeout_s)
+    except _BenchSuiteAborted as e:
+        return e.code, e.message
 
-    for run_metrics, task_run in zip(result.runs, result.task_runs, strict=True):
-        try:
-            write_run_artifact(
-                settings.BENCH_DATA_DIR,
-                run_metrics.run_id,
-                task_run.telemetry_samples,
-                task_run.inference_results,
-                run_metrics,
-            )
-        except ArtifactWriteError as e:
-            # An artifact-write failure must not lose the run's data from
-            # the bundle the operator is about to submit -- only the raw,
-            # on-disk trace copy is missing, which is a lesser loss.
-            logger.warning(
-                "bench %s: could not write the artifact folder for %s: %s",
-                suite, run_metrics.run_id, e,
-            )
+    _write_bench_artifacts(settings, result, suite=suite)
 
     node = _bench_quick_node_fingerprint(settings)
     try:
@@ -1302,6 +1356,142 @@ async def _reference_with_comparison(coro: Any) -> Any:
     result = await coro
     _REFERENCE_COMPARISON.append(format_reference_comparison(result))
     return result
+
+
+def _prism_summary_path(
+    data_dir: str | os.PathLike[str], rung_key: str, *, now_fn: Callable[[], datetime]
+) -> Path:
+    ts = now_fn().strftime("%Y%m%dT%H%M%SZ")
+    return Path(data_dir) / "prism" / f"{rung_key}-{ts}.json"
+
+
+def _prism_summary(result: PrismSuiteResult, *, now_fn: Callable[[], datetime]) -> dict[str, Any]:
+    """The rung's own record, for `scripts/compare-prism-rungs.py`.
+
+    `run_id` is the join key: it names the artifact folder holding
+    `items.parquet`, which is where the format control is actually settled
+    (same `item_id` -> same `correct`, same `completion_tokens` across three
+    storages of one checkpoint).
+
+    `model_path` is reduced to its basename. The file this writes is local and
+    never submitted, but it is the natural thing for an operator to paste into
+    an issue, and a home directory is not part of the measurement.
+    """
+    rung = result.rung
+    served = result.served
+    return {
+        "schema": "prism-mac-summary/1",
+        "written_at": now_fn().isoformat(),
+        "ctx_size": PRISM_CTX_SIZE,
+        "rung": {
+            "key": rung.key,
+            "stage": rung.stage,
+            "model": rung.model,
+            "quantization": rung.quantization,
+            "gguf_repo": rung.gguf_repo,
+            "gguf_revision": rung.gguf_revision,
+            "gguf_file": rung.gguf_file,
+            "size_gb": rung.size_gb,
+        },
+        "thinking": {
+            # Which mechanism actually held the axis off: the kwarg the row
+            # records, or a template that hardcodes it (see
+            # bench/prism.py's "The thinking axis is pinned two different
+            # ways"). A comparison reading only `thinking_mode` cannot tell.
+            "mechanism": thinking_axis_note(served.chat_template)[0],
+            "note": thinking_axis_note(served.chat_template)[1],
+        },
+        "served": {
+            "gguf_file": (
+                served.model_path.replace("\\", "/").rsplit("/", 1)[-1]
+                if served.model_path
+                else None
+            ),
+            "ftype": served.ftype,
+            "n_ctx": served.n_ctx,
+            "build_info": served.build_info,
+        },
+        "tasks": [
+            {
+                "run_id": run.run_id,
+                "task": run.task,
+                "n_items": run.n_items,
+                "n_correct": run.n_correct,
+                "n_shot": run.n_shot,
+                "seed": run.seed,
+                "max_tokens": run.max_tokens,
+                "thinking_mode": run.thinking_mode,
+                "accuracy": run.accuracy,
+                "truncated_pct": run.truncated_pct,
+                "total_joules_gpu": run.total_joules_gpu,
+                "total_joules_gpu_best": run.total_joules_gpu_best,
+                "total_joules_cpu": run.total_joules_cpu,
+                "total_joules_cpu_dram": run.total_joules_cpu_dram,
+                "joules_per_correct_answer": run.joules_per_correct_answer,
+                "joules_per_token": run.joules_per_token,
+                "total_completion_tokens": run.total_completion_tokens,
+                "run_duration_s": run.run_duration_s,
+                "mean_tokens_per_second": run.mean_tokens_per_second,
+                "energy_source": run.energy_source,
+                "engine_version": run.engine_version,
+                "gpu_name": run.gpu_name,
+                "measurement_tier": run.measurement_tier,
+            }
+            for run in result.runs
+        ],
+    }
+
+
+def run_bench_prism(
+    settings: Settings,
+    rung_key: str,
+    *,
+    port: int = PRISM_PORT,
+    timeout_s: float | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> tuple[int, str]:
+    """Measure one rung of the prism wave against an already-running server.
+
+    No `submit_fn`, and no bundle: the submission schema's `suite` enum and
+    the leaderboard's config key both live in the lab repo, and neither has
+    room for "which BUILD of llama.cpp served this" -- see
+    `bench/prism.py`'s module docstring. This writes artifacts and a local
+    summary and stops there.
+
+    Exit codes follow `_await_bench_suite` (0 measured, 1 nothing measured),
+    plus 2 when the server is serving something other than the rung asked
+    for -- an operator error with an exact remedy, not a failure of this box.
+    """
+    timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_PRISM_TIMEOUT_S)
+    now_fn = now_fn or _bench_utcnow
+    try:
+        result = _await_bench_suite(
+            run_prism_suite(rung_key=rung_key, llamacpp_port=port, budget_s=timeout_s),
+            suite="prism",
+            timeout_s=timeout_s,
+        )
+    except _BenchSuiteAborted as e:
+        return e.code, e.message
+    except (
+        UnknownPrismRungError,
+        PrismWeightsMismatchError,
+        PrismFtypeMismatchError,
+        PrismContextMismatchError,
+    ) as e:
+        return 2, str(e)
+
+    _write_bench_artifacts(settings, result, suite="prism")
+
+    summary_path = _prism_summary_path(settings.BENCH_DATA_DIR, result.rung.key, now_fn=now_fn)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(_prism_summary(result, now_fn=now_fn), indent=2, default=str)
+    )
+    return 0, (
+        f"{format_rung_summary(result)}\n"
+        f"  summary: {summary_path}\n"
+        f"  artifacts: {Path(settings.BENCH_DATA_DIR)}/<run_id>/items.parquet"
+    )
 
 
 def run_bench_tier(
@@ -1596,6 +1786,38 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     _add_bench_timeout_arg(bench_reference, "reference", BENCH_REFERENCE_TIMEOUT_S)
+    bench_prism = bench_sub.add_parser(
+        "prism",
+        help=(
+            "Measure ONE rung of the prism wave -- Bonsai sub-4-bit weights "
+            "on PrismML's llama.cpp fork -- against an already-running "
+            "llama-server. Writes artifacts and a local summary; never a "
+            "submission bundle (the public config key has no field for which "
+            "build of llama.cpp served the row). "
+            "`scripts/run-prism-wave-mac.sh` drives the whole wave."
+        ),
+    )
+    bench_prism.add_argument(
+        "--rung",
+        choices=rung_keys(),
+        help="Which rung this server is serving. Required unless --list.",
+    )
+    bench_prism.add_argument(
+        "--list",
+        action="store_true",
+        help="Print the wave's plan (rungs, weights, sizes) and exit.",
+    )
+    bench_prism.add_argument(
+        "--port",
+        type=int,
+        default=PRISM_PORT,
+        help=(
+            f"llama-server port (default {PRISM_PORT}, NOT 8080 -- a separate "
+            f"port is what stops a prism rung attaching to some other "
+            f"llama-server and producing a plausible wrong row)."
+        ),
+    )
+    _add_bench_timeout_arg(bench_prism, "prism", BENCH_PRISM_TIMEOUT_S)
     bench_submit = bench_sub.add_parser(
         "submit",
         help="Manually submit a bench bundle file (requires prior `bench opt-in`).",
@@ -1670,6 +1892,21 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 thinking=(
                     settings.BENCH_THINKING if args.thinking is None else args.thinking
+                ),
+            )
+        elif bench_sub == "prism":
+            if args.list or not args.rung:
+                # --list is the plan, and a bare `bench prism` is almost
+                # always someone asking what the wave is -- printing it beats
+                # an argparse error that names the flag but not the rungs.
+                print(describe_wave())
+                return 0 if args.list else 2
+            code, message = run_bench_prism(
+                settings,
+                args.rung,
+                port=args.port,
+                timeout_s=_resolve_bench_timeout_s(
+                    args.timeout, None, BENCH_PRISM_TIMEOUT_S
                 ),
             )
         elif bench_sub == "submit":

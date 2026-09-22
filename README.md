@@ -548,6 +548,7 @@ trace's first paragraph break.
 | `bench medium` | **which model runs best here** | 4 | ~2 h |
 | `bench full` | medium, plus the thinking axis | 4 × 2 | ~8 h |
 | `bench reference` | **the Efficiency Index anchor** | 1 | ~1 h |
+| `bench prism` | sub-4-bit weights, one rung at a time | 1 | ~1 h |
 
 `medium` and `full` measure a pinned roster — each entry fixed by Ollama tag
 *and* manifest digest, because a quantization name is not a set of weights.
@@ -599,6 +600,27 @@ async-energy-controller bench reference
 Note what a Mac can and cannot tell you here: accuracy is hardware-independent
 and travels, joules are a different vendor's model of different silicon and do
 not. The run says so itself when `energy_source` is not `counter`.
+
+### Sub-4-bit weights — `bench prism`
+
+Bonsai's ternary and 1-bit checkpoints on PrismML's llama.cpp fork, which is
+the only runtime that loads them. Five rungs ask two questions: whether the
+energy saving reverses below 2 bits per weight (the lab measured that it does,
+on Ampere, and nowhere else has checked), and whether a quantization really
+changes only storage — one 4B checkpoint published as F16, PQ2_0 and Q2_0_g64
+should answer every item identically.
+
+```bash
+scripts/run-prism-wave-mac.sh fetch   # prebuilt llama-server + pinned weights
+scripts/run-prism-wave-mac.sh run     # one server per rung, ~6-8 h on an M3
+python3 scripts/compare-prism-rungs.py
+```
+
+It writes artifacts and a local summary and **never a submission bundle**: the
+public config key has no field for which *build* of llama.cpp served a row,
+and these rungs are not mainline. [PRISM-MAC.md](PRISM-MAC.md) has the whole
+design — the rung table, the three interlocks that stop a wrong number, the
+memory and heat budget, and what these numbers may be compared to.
 
 ### A faster option — `bench calibrate`
 

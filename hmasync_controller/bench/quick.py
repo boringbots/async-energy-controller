@@ -355,8 +355,18 @@ async def resolve_quick_model(
     *,
     gguf_repo: str | None = None,
     gguf_revision: str | None = None,
+    model_id: str | None = None,
+    quantization: str | None = None,
 ) -> QuickModel:
     """Resolve + verify the model this run will measure. Never pulls.
+
+    `model_id`/`quantization` are recorded overrides for the llama.cpp branch
+    ONLY, and only a caller that has verified what is loaded may pass them
+    (`bench prism` reads both back from `GET /props` before measuring). They
+    exist because attach mode has nothing to read them from: the branch below
+    records the server's own id and a null quantization precisely so that it
+    never guesses. Ollama needs no equivalent -- its pinned tag and manifest
+    digest already name the weights.
 
     Raises:
         ModelNotAvailableError: The Ollama tag isn't pulled (names the exact
@@ -411,9 +421,13 @@ async def resolve_quick_model(
     served = models[0]
     return QuickModel(
         name=served,
-        note=f"llama.cpp: whatever was already loaded ({served})",
-        record_model=served,
-        record_quantization=None,
+        note=(
+            f"llama.cpp: {served} (verified as {quantization})"
+            if quantization
+            else f"llama.cpp: whatever was already loaded ({served})"
+        ),
+        record_model=model_id or served,
+        record_quantization=quantization,
         # Only a caller that verified the served file against a pin
         # (`bench reference`) passes these; plain `bench quick` records None.
         record_gguf_repo=gguf_repo,
@@ -1017,6 +1031,8 @@ async def _run_bench_suite(
     budget_s: float | None = None,
     thinking: bool = False,
     entry: "RosterEntry | None" = None,
+    model_id: str | None = None,
+    quantization: str | None = None,
     gguf_repo: str | None = None,
     gguf_revision: str | None = None,
 ) -> QuickSuiteResult:
@@ -1078,7 +1094,12 @@ async def _run_bench_suite(
     logger.info("  engine: %s at %s", detected.name, detected.base_url)
 
     model = await resolve_quick_model(
-        detected, entry, gguf_repo=gguf_repo, gguf_revision=gguf_revision
+        detected,
+        entry,
+        gguf_repo=gguf_repo,
+        gguf_revision=gguf_revision,
+        model_id=model_id,
+        quantization=quantization,
     )
     logger.info("  model: %s", model.note)
 

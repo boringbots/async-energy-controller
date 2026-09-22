@@ -20,6 +20,10 @@ bench_data/
 # cannot end up as a commit.
 ref/
 *.gguf
+# What `scripts/run-prism-wave-mac.sh` drops: the fork's prebuilt llama-server,
+# 23 GB of Bonsai weights, and one server log per rung. Same reason as ref/ --
+# the documented command must not be able to become a commit.
+prism-mac/
 
 # Python
 __pycache__/
