@@ -30,12 +30,17 @@ from hmasync_controller.bench.metrics.compute import (
     compute_power_shape,
     compute_streaming_latency,
 )
-from hmasync_controller.bench.metrics.costmodel import compute_item_energies_j, fit_cost_model
+from hmasync_controller.bench.metrics.costmodel import (
+    compute_item_energies_j,
+    fit_cost_model,
+)
 from hmasync_controller.bench.metrics.derived import (
     accuracy_per_watt,
     ipj,
     net_joules,
+    net_wall_joules,
     wall_accuracy_per_watt,
+    wall_joules,
 )
 from hmasync_controller.bench.metrics.flexibility import (
     MIN_SWEEP_POINTS,
@@ -57,7 +62,11 @@ from hmasync_controller.bench.metrics.models import (
     RunMetrics,
     WallPowerSample,
 )
-from hmasync_controller.bench.metrics.stats import accuracy_ci, bootstrap_jpc_ci, pooled_mean_sigma
+from hmasync_controller.bench.metrics.stats import (
+    accuracy_ci,
+    bootstrap_jpc_ci,
+    pooled_mean_sigma,
+)
 
 __all__ = [
     "MIN_SWEEP_POINTS",
@@ -90,7 +99,9 @@ __all__ = [
     "fit_cost_model",
     "ipj",
     "net_joules",
+    "net_wall_joules",
     "pooled_mean_sigma",
     "sweep_config_key",
     "wall_accuracy_per_watt",
+    "wall_joules",
 ]
