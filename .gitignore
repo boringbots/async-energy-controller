@@ -76,3 +76,7 @@ ralph.sh
 # (US-MERGE-01 discrepancy: this pattern used to be bare `tasks/`, which is
 # unanchored and would have silently hidden that package from git).
 /tasks/
+# Archive-only prism bundles (see prism-results/README.md) -- they belong on
+# the share drive, not in a public repo.
+prism-results/
+prism-models/

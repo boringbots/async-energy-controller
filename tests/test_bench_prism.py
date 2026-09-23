@@ -119,3 +119,41 @@ class TestCli:
             (Path(cli.__file__).parent / "schemas" / "bench_submission.schema.json").read_text()
         )
         assert "prism" in schema["properties"]["suite"]["enum"]
+
+
+class TestArchiveOnly:
+    """prism rows go to a share drive, not the API.
+
+    The wave measures an engine fork and weights that exist nowhere else in
+    the corpus, so its rows have no counterpart to pool with -- and the public
+    API validates against a vendored copy of the schema, so upstreaming
+    `prism` would need a schema bump plus a redeploy before one row landed."""
+
+    def test_the_submit_seam_is_never_wired_for_prism(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_cli(settings, coro, *, suite, submit_fn, now_fn, timeout_s):
+            seen["suite"] = suite
+            seen["submit_fn"] = submit_fn
+            coro.close()
+            return 0, "bundle written to x.json"
+
+        monkeypatch.setattr(cli, "_run_bench_suite_cli", fake_cli)
+        code, _ = cli.run_bench_prism(cli.Settings(), submit_fn=cli._bench_submit_fn)
+        assert code == 0
+        assert seen["suite"] == "prism"
+        assert seen["submit_fn"] is None, "a prism bundle must not reach the wire"
+
+    def test_opting_in_does_not_change_that(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_cli(settings, coro, *, suite, submit_fn, now_fn, timeout_s):
+            seen["submit_fn"] = submit_fn
+            coro.close()
+            return 0, "ok"
+
+        s = cli.Settings()
+        s.BENCH_OPTIN = True
+        monkeypatch.setattr(cli, "_run_bench_suite_cli", fake_cli)
+        cli.run_bench_prism(s, submit_fn=cli._bench_submit_fn)
+        assert seen["submit_fn"] is None

@@ -1279,6 +1279,20 @@ def run_bench_prism(
     remedy, not a failure of this box.
     """
     timeout_s = _resolve_bench_timeout_s(timeout_s, None, BENCH_PRISM_TIMEOUT_S)
+    # Archive-only: prism bundles are NOT submitted, even when opted in.
+    #
+    # This is an exploratory wave on an engine fork and weights that exist
+    # nowhere else in the corpus, so its rows have no counterpart to pool with
+    # and nothing downstream is ready to read them. The public API validates
+    # submissions against a vendored copy of the bundle schema, so shipping
+    # `prism` upstream would mean a schema bump plus an API redeploy before a
+    # single row could land -- a lot of moving parts for data that wants to sit
+    # in a share drive and be looked at.
+    #
+    # The bundle is still written, validated and denylist-checked exactly as
+    # every other suite's is; it simply stops short of the wire. Passing the
+    # real submit_fn here instead is the one-line change if that ever flips.
+    del submit_fn
     try:
         return _run_bench_suite_cli(
             settings,
@@ -1287,7 +1301,7 @@ def run_bench_prism(
                 budget_s=timeout_s,
             ),
             suite="prism",
-            submit_fn=submit_fn,
+            submit_fn=None,
             now_fn=now_fn,
             timeout_s=timeout_s,
         )
