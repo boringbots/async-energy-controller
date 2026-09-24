@@ -64,3 +64,49 @@ def net_joules(
     if total_joules is None or loaded_idle_w is None or duration_s is None:
         return None
     return total_joules - loaded_idle_w * duration_s
+
+
+def wall_joules(mean_wall_w: float | None, duration_s: float | None) -> float | None:
+    """Gross whole-machine joules: `mean_wall_w * duration_s`.
+
+    The smart plug reports power, not energy (its cumulative kWh counter
+    ticks in 0.01 kWh steps, coarser than most runs), so the whole-machine
+    figure is always this product. `None` when either input is `None`.
+    """
+    if mean_wall_w is None or duration_s is None:
+        return None
+    return mean_wall_w * duration_s
+
+
+def net_wall_joules(
+    mean_wall_w: float | None,
+    idle_wall_w: float | None,
+    duration_s: float | None,
+) -> float | None:
+    """Whole-machine joules above the machine's own idle draw.
+
+    `(mean_wall_w - idle_wall_w) * duration_s`.
+
+    **The floor here is the `kind='empty'` baseline, not `kind='loaded'` --
+    the opposite of `net_joules`.** The GPU metric subtracts loaded idle
+    because a serving deployment keeps the model resident and the work sits
+    on top of that. The wall metric cannot: "resident" is exactly the
+    variable under test when engines place weights differently, so a loaded
+    wall floor would be engine-specific and the rungs of a residency ladder
+    would each be measured against a different zero. The empty baseline is
+    the one thing every engine on a node shares -- what the box costs
+    switched on and doing nothing.
+
+    So this answers "what did choosing to run this workload cost, above
+    owning the machine", while gross answers "what did the machine draw
+    while doing it". Report gross as the headline and this beside it:
+    on .114 idle is 68.9 W, which is 13 % of a vLLM run's draw and 19-20 %
+    of a CPU-offloaded run's, so gross quietly favours whichever engine
+    finishes sooner.
+
+    `None` when any input is `None`. Can be negative if a run somehow drew
+    less than idle; shown as measured, never clamped.
+    """
+    if mean_wall_w is None or idle_wall_w is None or duration_s is None:
+        return None
+    return (mean_wall_w - idle_wall_w) * duration_s

@@ -157,3 +157,61 @@ class TestArchiveOnly:
         monkeypatch.setattr(cli, "_run_bench_suite_cli", fake_cli)
         cli.run_bench_prism(s, submit_fn=cli._bench_submit_fn)
         assert seen["submit_fn"] is None
+
+class TestTheThinkingAxis:
+    # The two templates the wave actually meets, as they are STORED in the
+    # GGUF -- a template source, so the newlines are the two characters
+    # backslash-n, not newlines.
+    TEMPLATE_27B = (
+        "{%- if add_generation_prompt %}\n"
+        "    {{- '<|im_start|>assistant\\n' }}\n"
+        "    {%- if enable_thinking is defined and enable_thinking is false %}\n"
+        "        {{- '<think>\\n\\n</think>\\n\\n' }}\n"
+        "    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}"
+    )
+    TEMPLATE_4B = (
+        "{%- if add_generation_prompt %}\n"
+        "    {{- '<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n' }}\n{%- endif %}"
+    )
+
+    def test_the_27b_template_reads_the_kwarg(self):
+        """Its default is thinking ON, so the pin this mode sends is what
+        holds the axis -- dropping it turns the 27B rungs into reasoning runs
+        at many times the energy."""
+        mechanism, _ = prism.thinking_axis_note(self.TEMPLATE_27B)
+        assert mechanism == prism.THINKING_AXIS_KWARG
+
+    def test_the_4b_template_hardcodes_it_off(self):
+        """No enable_thinking variable at all: the pin is inert here and the
+        template is what holds the axis. Recognising the ESCAPED form is the
+        whole trick -- a matcher written against rendered newlines would call
+        this template unpinned."""
+        mechanism, note = prism.thinking_axis_note(self.TEMPLATE_4B)
+        assert mechanism == prism.THINKING_AXIS_TEMPLATE
+        assert "inert" in note
+
+    def test_a_template_that_does_neither_is_called_out(self):
+        mechanism, note = prism.thinking_axis_note(
+            "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}"
+        )
+        assert mechanism == prism.THINKING_AXIS_UNKNOWN
+        assert "REASONING" in note
+
+    def test_no_template_is_unknown_rather_than_assumed(self):
+        assert prism.thinking_axis_note(None)[0] == prism.THINKING_AXIS_UNKNOWN
+
+
+class TestTheThinkingAxisIsAdvisoryHere:
+    """This tier names its rung from `GET /v1/models`, so the template read is
+    for the thinking axis alone. A server that cannot serve `/props` must
+    still produce a rung -- the note degrades, the measurement does not."""
+
+    def test_an_unreachable_server_yields_no_template_rather_than_raising(self):
+        # Port 1 on localhost: nothing listens, so the GET fails outright.
+        assert _run(prism._fetch_chat_template("http://localhost:1")) is None
+
+    def test_a_missing_template_reads_as_unknown_not_as_pinned(self):
+        mechanism, _ = prism.thinking_axis_note(
+            _run(prism._fetch_chat_template("http://localhost:1"))
+        )
+        assert mechanism == prism.THINKING_AXIS_UNKNOWN

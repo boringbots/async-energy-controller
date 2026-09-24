@@ -42,7 +42,10 @@ not average it away.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
+
+import httpx
 
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT
 from hmasync_controller.bench.quick import (
@@ -61,10 +64,14 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "PRISM_GGUFS",
     "PRISM_TASKS",
+    "THINKING_AXIS_KWARG",
+    "THINKING_AXIS_TEMPLATE",
+    "THINKING_AXIS_UNKNOWN",
     "PrismGGUF",
     "PrismWeightsUnknownError",
     "match_served_gguf",
     "run_prism_suite",
+    "thinking_axis_note",
 ]
 
 PRISM_TASKS = FULL_TASKS
@@ -271,6 +278,82 @@ def _how_to_serve_it() -> str:
     return "\n".join(lines)
 
 
+THINKING_AXIS_KWARG = "kwarg"
+THINKING_AXIS_TEMPLATE = "template"
+THINKING_AXIS_UNKNOWN = "unknown"
+
+_THINK_OFF_PATTERN = re.compile(r"<think>(?:\\n|\s)*</think>")
+"""An empty <think> block in the template's generation prompt -- thinking off
+by construction. The alternation is not defensive vagueness: a GGUF stores the
+template SOURCE, so the 4B's block is the two characters backslash-n repeated
+(verified by reading the file's metadata, 2026-09-22), not the newlines it
+renders to. Matching only the rendered form would report every such template
+as unpinned and cry wolf on the one family that cannot be unpinned."""
+
+
+def thinking_axis_note(chat_template: str | None) -> tuple[str, str]:
+    """How thinking is actually held off for the served template.
+
+    Returns `(mechanism, human note)` where mechanism is one of
+    `kwarg` / `template` / `unknown`. This exists because `RunMetrics
+    .thinking_mode` records what was SENT, and on a template with no
+    `enable_thinking` variable what was sent reached nothing -- the row would
+    carry a pin that did no work.
+
+    Read out of the GGUFs themselves (2026-09-22), the two Bonsai families do
+    not agree on how thinking is controlled. The 27B's template reads
+    `enable_thinking` and with it UNSET emits a bare `<think>`, so the pin
+    `run_prism_suite` sends is load-bearing: drop it and those rungs silently
+    become thinking runs at many times the energy. The 4B's template has no
+    `enable_thinking` at all and hardcodes an empty `<think>` block, so
+    thinking is off whatever is sent and the pin is inert.
+
+    Both therefore measure thinking-off, which is what the comparison needs. A
+    third template that did neither would be thinking-ON while its row still
+    read `enable_thinking=false`, and that is the case worth shouting about.
+    """
+    if not chat_template:
+        return THINKING_AXIS_UNKNOWN, (
+            "the server reported no chat template, so the thinking axis could "
+            "not be confirmed; the row's thinking_mode records only what was sent"
+        )
+    if "enable_thinking" in chat_template:
+        return THINKING_AXIS_KWARG, (
+            "the template reads enable_thinking, so the pin this mode sends is "
+            "what holds thinking off"
+        )
+    if _THINK_OFF_PATTERN.search(chat_template):
+        return THINKING_AXIS_TEMPLATE, (
+            "the template hardcodes an empty <think> block, so thinking is off "
+            "by construction and the enable_thinking pin is inert here"
+        )
+    return THINKING_AXIS_UNKNOWN, (
+        "the template neither reads enable_thinking nor hardcodes an empty "
+        "<think> block -- this rung may be REASONING while its row records "
+        "enable_thinking=false. Treat its energy as a different axis until "
+        "the template is read by hand"
+    )
+
+
+async def _fetch_chat_template(base_url: str) -> str | None:
+    """The template llama-server will render, or None if it cannot be read.
+
+    Advisory only, and deliberately non-fatal: this tier identifies its rung
+    from `GET /v1/models`, so nothing about the measurement depends on
+    `/props`. It is read for the thinking axis alone and never stored on a
+    row -- a server too old to serve `/props` should still produce a rung.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{base_url}/props")
+        if response.status_code != 200:
+            return None
+        template = response.json().get("chat_template")
+    except (httpx.RequestError, ValueError):
+        return None
+    return template if isinstance(template, str) else None
+
+
 async def run_prism_suite(
     *,
     host: str = "localhost",
@@ -322,6 +405,15 @@ async def run_prism_suite(
     logger.info("  stage   : %s", entry.stage)
     logger.info("  weights : %s @ %s", entry.repo, entry.revision[:12])
     logger.info("  recorded: model=%s quantization=%s", entry.hf_id, entry.quantization)
+
+    # The row records the kwarg that was SENT; this says whether it did any
+    # work. Advisory -- see `thinking_axis_note` for why the distinction
+    # matters and `_fetch_chat_template` for why a failure here is not fatal.
+    mechanism, note = thinking_axis_note(await _fetch_chat_template(detected.base_url))
+    if mechanism == THINKING_AXIS_UNKNOWN:
+        logger.warning("  thinking: %s", note)
+    else:
+        logger.info("  thinking: %s", note)
 
     return await _run_bench_suite(
         engine_choice="llamacpp",
