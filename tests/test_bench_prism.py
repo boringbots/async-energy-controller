@@ -201,17 +201,47 @@ class TestTheThinkingAxis:
         assert prism.thinking_axis_note(None)[0] == prism.THINKING_AXIS_UNKNOWN
 
 
-class TestTheThinkingAxisIsAdvisoryHere:
-    """This tier names its rung from `GET /v1/models`, so the template read is
-    for the thinking axis alone. A server that cannot serve `/props` must
-    still produce a rung -- the note degrades, the measurement does not."""
+class TestReadingPropsIsAdvisoryHere:
+    """This tier names its rung from `GET /v1/models`, so `/props` is read
+    for the thinking axis and the window alone. A server that cannot serve
+    it must still produce a rung -- the notes degrade, the row is written."""
 
-    def test_an_unreachable_server_yields_no_template_rather_than_raising(self):
+    def test_an_unreachable_server_yields_no_props_rather_than_raising(self):
+        from hmasync_controller.bench.quick import fetch_llamacpp_props
+
         # Port 1 on localhost: nothing listens, so the GET fails outright.
-        assert _run(prism._fetch_chat_template("http://localhost:1")) is None
+        props = _run(fetch_llamacpp_props("http://localhost:1"))
+        assert (props.chat_template, props.n_ctx, props.build_info) == (None, None, None)
 
     def test_a_missing_template_reads_as_unknown_not_as_pinned(self):
-        mechanism, _ = prism.thinking_axis_note(
-            _run(prism._fetch_chat_template("http://localhost:1"))
-        )
-        assert mechanism == prism.THINKING_AXIS_UNKNOWN
+        from hmasync_controller.bench.quick import fetch_llamacpp_props
+
+        props = _run(fetch_llamacpp_props("http://localhost:1"))
+        assert prism.thinking_axis_note(props.chat_template)[0] == prism.THINKING_AXIS_UNKNOWN
+
+    def test_the_window_and_build_are_read_out_of_the_props_body(self):
+        """The fork's own /props shape: n_ctx lives under
+        default_generation_settings, build_info at the top."""
+        from hmasync_controller.bench.quick import parse_llamacpp_props
+
+        props = parse_llamacpp_props({
+            "default_generation_settings": {"n_ctx": 4096, "params": {}},
+            "build_info": "b1-5d80cff0",
+            "chat_template": "{{ messages }}",
+        })
+        assert props.n_ctx == 4096
+        assert props.build_info == "b1-5d80cff0"
+        assert props.chat_template == "{{ messages }}"
+
+    def test_a_malformed_body_is_all_none(self):
+        from hmasync_controller.bench.quick import parse_llamacpp_props
+
+        assert parse_llamacpp_props(["not", "a", "dict"]).n_ctx is None
+        assert parse_llamacpp_props({"default_generation_settings": "x"}).n_ctx is None
+
+    def test_the_how_to_serves_the_labs_window(self):
+        """-c 4096 is what cut the 2026-09-23 wave's math500 items."""
+        text = prism._how_to_serve_it()
+        command = next(line for line in text.splitlines() if line.strip().startswith("llama-server"))
+        assert "-c 16384" in command
+        assert "--fit off" in command

@@ -280,6 +280,31 @@ def _export_run(run: RunMetrics, node_hash: str | None, created_at: str) -> dict
     return exported
 
 
+COUNTER_INTEGRATION_MAX_PCT_DIFF = 10.0
+"""Past this, the run's two energy totals describe different runs. The 5 Hz
+integral carries a known +5.7-7.3% bias against NVML's counter on the lab's
+cards (paper §8.9); the Apple prism cells that slept between requests
+disagreed by 37-573%. Ten sits between them."""
+
+
+def submission_gate_reason(run: RunMetrics) -> str | None:
+    """Why this row must not leave the box, or None when it may.
+
+    The local artifact is written regardless -- the gate is on the bundle,
+    where a row pools with strangers' rows and has to be able to stand on
+    its stored columns alone.
+    """
+    diff = run.counter_vs_integration_pct_diff
+    if diff is not None and abs(diff) > COUNTER_INTEGRATION_MAX_PCT_DIFF:
+        gap = f", sampler absent {run.sampler_gap_s:.0f}s" if run.sampler_gap_s else ""
+        return (
+            f"counter and integrated energy disagree by {diff:.0f}% "
+            f"(limit {COUNTER_INTEGRATION_MAX_PCT_DIFF:.0f}%{gap}) -- the sampler was "
+            f"not running for part of the run"
+        )
+    return None
+
+
 def build_bundle(
     runs: list[RunMetrics],
     node: dict[str, object] | None,

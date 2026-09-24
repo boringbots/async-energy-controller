@@ -235,3 +235,30 @@ class RunMetrics:
     gpu_power_crest_factor: float | None = None
     gpu_power_p95_p50_ratio: float | None = None
     gpu_power_jaggedness_w_per_s: float | None = None
+
+    # --- Engine window and box state -----------------------------------
+    # Local artifact only (bench/bundle.py's export allowlist does not carry
+    # them); each exists because its absence cost a wave. The Apple prism
+    # wave of 2026-09-23/24 ran in a 4,096-token window while recording
+    # `max_tokens` 16,384 -- the cap that was REQUESTED, never the window
+    # the engine actually had -- and every math500 cell was cut by it.
+    engine_ctx_size: int | None = None
+    """The context window the engine reports (`n_ctx` from llama-server's
+    `GET /props`), when the mode reads it back. None means unread, never
+    "no limit"."""
+    engine_build: str | None = None
+    """The engine's own build string (`build_info` from `/props`), which
+    names WHICH build served the row where `engine_version` cannot."""
+    power_source: str | None = None
+    """'ac' or 'battery' on a laptop, from `pmset -g batt`; macOS caps GPU
+    clocks on battery, so a row that does not say which it was cannot be
+    compared with one that does."""
+
+    # --- Sampler continuity --------------------------------------------
+    sampler_gap_s: float | None = None
+    """Seconds the sampler was NOT running during the run: the sum of every
+    gap between consecutive samples longer than
+    `compute.SAMPLER_GAP_THRESHOLD_S`. A laptop that sleeps between requests
+    shows up here as 925 s holes, and the 5 Hz integral over-counts across
+    each one while the hardware counter's delta does not."""
+    sampler_gap_count: int | None = None

@@ -56,7 +56,11 @@ from hmasync_controller.bench.apple_sampler import (
 )
 from hmasync_controller.bench import denylisted_keys, drain_bench_spool, submit_bundle_file
 from hmasync_controller.bench.artifact import ArtifactWriteError, write_run_artifact
-from hmasync_controller.bench.bundle import ExportDenylistViolation, build_bundle
+from hmasync_controller.bench.bundle import (
+    ExportDenylistViolation,
+    build_bundle,
+    submission_gate_reason,
+)
 from hmasync_controller.bench.prism import (
     PrismWeightsUnknownError,
     run_prism_suite,
@@ -1119,9 +1123,25 @@ def _run_bench_suite_cli(
                 suite, run_metrics.run_id, e,
             )
 
+    submittable = []
+    for run_metrics in result.runs:
+        reason = submission_gate_reason(run_metrics)
+        if reason is None:
+            submittable.append(run_metrics)
+            continue
+        logger.warning(
+            "bench %s: %s kept locally but left out of the bundle: %s",
+            suite, run_metrics.run_id, reason,
+        )
+    if not submittable:
+        return 0, (
+            f"{len(result.runs)} run(s) written to {settings.BENCH_DATA_DIR}; none "
+            f"passed the submission gate, so no bundle was written"
+        )
+
     node = _bench_quick_node_fingerprint(settings)
     try:
-        bundle = build_bundle(result.runs, node, suite=suite)
+        bundle = build_bundle(submittable, node, suite=suite)
     except ExportDenylistViolation as e:
         # Defense in depth: `build_bundle`'s own allowlist should make this
         # unreachable in practice (see bench/bundle.py's module docstring),

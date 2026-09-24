@@ -84,18 +84,29 @@ def consecutive_hw_thermal_seconds(samples: list[TelemetrySample]) -> float:
     if not samples:
         return 0.0
     last = samples[-1]
-    if last.gpu_throttle_reasons is None or not (
-        last.gpu_throttle_reasons & THROTTLE_HW_THERMAL
-    ):
+    if not _hw_throttled(last):
         return 0.0
     run_start_ts = last.ts
     for sample in reversed(samples):
-        if sample.gpu_throttle_reasons is None or not (
-            sample.gpu_throttle_reasons & THROTTLE_HW_THERMAL
-        ):
+        if not _hw_throttled(sample):
             break
         run_start_ts = sample.ts
     return last.ts - run_start_ts
+
+
+def _hw_throttled(sample: TelemetrySample) -> bool:
+    """The hardware is protecting itself, on either kind of box.
+
+    NVML: the `hw_thermal` bit. Apple Silicon: `pmset -g therm`'s
+    CPU_Speed_Limit under 100 (`bench.apple_sampler`), the SoC's own
+    pressure signal and the only one readable without sudo. Either channel
+    being None is "unread", never "throttled".
+    """
+    if sample.gpu_throttle_reasons is not None and (
+        sample.gpu_throttle_reasons & THROTTLE_HW_THERMAL
+    ):
+        return True
+    return sample.cpu_speed_limit_pct is not None and sample.cpu_speed_limit_pct < 100
 
 
 async def maybe_pause_for_thermal_throttle(

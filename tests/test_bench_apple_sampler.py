@@ -444,3 +444,63 @@ class TestPowerLimits:
     def test_setting_a_limit_fails_soft_rather_than_raising(self):
         """Same contract as NVML without privilege: None, never an exception."""
         assert asyncio.run(AppleSiliconSampler().set_power_limit_w(150)) is None
+
+
+class TestPmsetReadings:
+    THERM = (
+        "Note: No thermal warning level has been recorded\n"
+        "Note: No performance warning level has been recorded\n"
+        "CPU_Scheduler_Limit \t= 100\n"
+        "CPU_Available_CPUs \t= 8\n"
+        "CPU_Speed_Limit \t= 62\n"
+    )
+
+    def test_cpu_speed_limit_is_parsed(self):
+        from hmasync_controller.bench.apple_sampler import parse_cpu_speed_limit_pct
+
+        assert parse_cpu_speed_limit_pct(self.THERM) == 62
+        assert parse_cpu_speed_limit_pct("garbage") is None
+        assert parse_cpu_speed_limit_pct(None) is None
+
+    def test_power_source_is_parsed(self):
+        from hmasync_controller.bench.apple_sampler import parse_power_source
+
+        assert parse_power_source("Now drawing from 'AC Power'\n -InternalBattery-0\t100%; charged") == "ac"
+        assert parse_power_source("Now drawing from 'Battery Power'\n -InternalBattery-0\t61%") == "battery"
+        assert parse_power_source("") is None
+
+    def test_the_reading_is_stamped_on_every_tick_and_polled_slowly(self):
+        """A subprocess at 5 Hz would cost more than it tells; the sampler
+        re-reads every THERM_POLL_S and repeats the last value between."""
+        from hmasync_controller.bench import apple_sampler as mod
+
+        monitor = FakeMonitor()
+        sampler = _wired(AppleSiliconSampler(), monitor)
+        calls = []
+
+        def reader():
+            calls.append(1)
+            return 55
+
+        sampler._therm_reader = reader
+        first, second = sampler.sample(), sampler.sample()
+        assert first.cpu_speed_limit_pct == 55 and second.cpu_speed_limit_pct == 55
+        assert len(calls) == 1, "second tick inside THERM_POLL_S must reuse the reading"
+        assert mod.THERM_POLL_S >= 1.0
+
+    def test_a_throttled_mac_now_reaches_the_health_rollup(self):
+        from hmasync_controller.bench.metrics.compute import compute_hardware_health
+
+        sampler = _wired(AppleSiliconSampler(), FakeMonitor())
+        sampler._therm_reader = lambda: 40
+        samples = [sampler.sample() for _ in range(3)]
+        assert compute_hardware_health(samples, gpu_mem_total_mib=None)["thermal_throttle_pct"] == 100.0
+
+    def test_gpu_info_carries_the_power_source(self, monkeypatch):
+        from hmasync_controller.bench import apple_sampler as mod
+
+        monkeypatch.setattr(mod, "read_power_source", lambda: "battery")
+        sampler = _wired(AppleSiliconSampler(), FakeMonitor())
+        info = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(sampler.gpu_info())
+        assert info["power_source"] == "battery"
+

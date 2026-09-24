@@ -72,6 +72,16 @@ a `None` mask as "not throttled" (`consecutive_hw_thermal_seconds`). Apple
 exposes no such bit unprivileged, so on this sampler the circuit-breaker
 never fires and `thermal_throttle_pct` stays `None`.
 
+    UPDATE 2026-09-24: it has a signal now. `pmset -g therm` reports
+    `CPU_Speed_Limit` without sudo, 100 when the SoC is unthrottled; the
+    sampler polls it every THERM_POLL_S and stamps `cpu_speed_limit_pct` on
+    each tick. `compute_hardware_health` turns it into `thermal_throttle_pct`
+    (percent of samples under 100) and `bench.thermal` treats a limit under
+    100 as `hw_thermal`, so the breaker arms on a Mac. It is the SoC's
+    pressure, not a GPU clock -- a proxy, and the only one available.
+    `pmset -g batt` is read once per run into `power_source` for the same
+    reason: on battery macOS caps GPU clocks, and the row has to say so.
+
 This is not a small caveat on a laptop. A fanless MacBook Air under a
 sustained benchmark throttles hard, and the run will complete looking
 perfectly healthy. Inferring throttling from a falling token rate was
@@ -92,7 +102,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import platform
+from collections.abc import Callable
 import time
 from typing import Any
 
@@ -143,6 +155,13 @@ class AppleSiliconSampler:
         self._window = 0
         self._tick_opened_at: float | None = None
         self._sram_seen = False
+        # `pmset -g therm` is a subprocess, so it is polled every
+        # THERM_POLL_S and the last reading is stamped on every tick between
+        # polls. `_therm_reader` is an attribute so a test can hand in a
+        # canned reading without a Mac.
+        self._therm_reader: Callable[[], int | None] = read_cpu_speed_limit_pct
+        self._therm_read_at: float = 0.0
+        self._cpu_speed_limit_pct: int | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -227,6 +246,10 @@ class AppleSiliconSampler:
         metrics, elapsed_s = self._close_window()
         ts = time.time()
 
+        if ts - self._therm_read_at >= THERM_POLL_S:
+            self._cpu_speed_limit_pct = self._therm_reader()
+            self._therm_read_at = ts
+
         gpu_mj = self._gpu_mj(metrics)
         if getattr(metrics, "gpu_sram_mj", None) is not None:
             self._sram_seen = True
@@ -269,6 +292,7 @@ class AppleSiliconSampler:
             # -- which only ever adds on a NEGATIVE step -- never triggers.
             cpu_rapl_uj=self._cum_cpu_mj * 1000.0 if cpu_mj is not None else None,
             cpu_rapl_dram_uj=self._cum_dram_mj * 1000.0 if dram_mj is not None else None,
+            cpu_speed_limit_pct=self._cpu_speed_limit_pct,
         )
 
     async def start(self, run_id: str = "") -> None:
@@ -310,9 +334,9 @@ class AppleSiliconSampler:
         return samples
 
     def current_samples(self) -> list[TelemetrySample]:
-        """Snapshot for `bench.thermal`'s mid-run read. It will find no
-        throttle mask here and therefore never trip -- see the module
-        docstring."""
+        """Snapshot for `bench.thermal`'s mid-run read. There is no NVML
+        throttle mask here; the breaker reads `cpu_speed_limit_pct` instead
+        (see the module docstring)."""
         return list(self._samples)
 
     # --- identity and power limits ----------------------------------------
@@ -330,6 +354,8 @@ class AppleSiliconSampler:
             "cuda_version": None,
             "energy_source": self.energy_source,
             "gpu_energy_channels": "gpu+sram" if self._sram_seen else "gpu",
+            # macOS caps GPU clocks on battery; a row has to say which.
+            "power_source": read_power_source(),
         }
 
     async def get_power_limit_w(self) -> int | None:
@@ -391,3 +417,52 @@ def _chip_name() -> str | None:
         return None
     name = out.stdout.strip()
     return name or None
+
+
+THERM_POLL_S = 5.0
+"""How often `sample()` re-reads `pmset -g therm`. A subprocess at 5 Hz
+would cost more than the reading is worth; thermal pressure does not change
+in 200 ms."""
+
+_CPU_SPEED_LIMIT = re.compile(r"CPU_Speed_Limit\s*=\s*(\d+)")
+
+
+def _pmset(arg: str) -> str | None:
+    """`pmset -g <arg>` as text, or None when it cannot be run."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["pmset", "-g", arg], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def parse_cpu_speed_limit_pct(text: str | None) -> int | None:
+    """`CPU_Speed_Limit = 100` out of `pmset -g therm`, or None."""
+    if not text:
+        return None
+    m = _CPU_SPEED_LIMIT.search(text)
+    return int(m.group(1)) if m else None
+
+
+def parse_power_source(text: str | None) -> str | None:
+    """'ac' or 'battery' from `pmset -g batt`'s first line
+    (`Now drawing from 'AC Power'`), or None when it says neither."""
+    if not text:
+        return None
+    if "'AC Power'" in text:
+        return "ac"
+    if "'Battery Power'" in text:
+        return "battery"
+    return None
+
+
+def read_cpu_speed_limit_pct() -> int | None:
+    return parse_cpu_speed_limit_pct(_pmset("therm"))
+
+
+def read_power_source() -> str | None:
+    return parse_power_source(_pmset("batt"))

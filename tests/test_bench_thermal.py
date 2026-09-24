@@ -160,3 +160,21 @@ class TestMaybePauseForThermalThrottle:
         assert THERMAL_PAUSE_TIMEOUT_S > THERMAL_PAUSE_POLL_S
         assert THERMAL_PAUSE_POLL_S > 0
         assert HW_THERMAL_SUSTAINED_S > 0
+
+
+class TestAppleSpeedLimitCountsAsThrottled:
+    """The breaker used to be inert on a Mac: no NVML mask, so never armed.
+    `pmset -g therm`'s CPU_Speed_Limit under 100 now counts."""
+
+    def _mac(self, ts, limit):
+        return TelemetrySample(ts=ts, gpu_power_w=3.0, gpu_util_pct=None, gpu_mem_used_mib=None,
+                               gpu_temp_c=None, gpu_throttle_reasons=None, cpu_speed_limit_pct=limit)
+
+    def test_a_trailing_run_under_100_is_measured(self):
+        samples = [self._mac(0.0, 100), self._mac(1.0, 100), self._mac(2.0, 70), self._mac(5.0, 60)]
+        assert consecutive_hw_thermal_seconds(samples) == 3.0
+
+    def test_unthrottled_and_unread_are_both_zero(self):
+        assert consecutive_hw_thermal_seconds([self._mac(0.0, 100), self._mac(1.0, 100)]) == 0.0
+        assert consecutive_hw_thermal_seconds([self._mac(0.0, None), self._mac(1.0, None)]) == 0.0
+

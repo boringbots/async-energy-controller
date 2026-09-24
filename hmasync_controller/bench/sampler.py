@@ -64,6 +64,13 @@ class TelemetrySample:
     gpu_perf_state: int | None = None
     cpu_rapl_uj: float | None = None
     cpu_rapl_dram_uj: float | None = None
+    cpu_speed_limit_pct: int | None = None
+    """Apple's only unprivileged thermal signal: `CPU_Speed_Limit` from
+    `pmset -g therm`, 100 when unthrottled. Set by `bench.apple_sampler`
+    only; NVML boxes carry their throttle state in `gpu_throttle_reasons`
+    and leave this None. A proxy -- it is the SoC's pressure, not a GPU
+    clock -- but on a fanless laptop it is the difference between a
+    throttled five-hour cell that says so and one that does not."""
 
 
 def _format_cuda_version(raw: int) -> str:

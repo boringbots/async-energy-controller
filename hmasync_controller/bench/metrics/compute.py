@@ -100,7 +100,42 @@ def compute_hardware_health(
         out["thermal_throttle_pct"] = None
         out["power_cap_throttle_pct"] = None
 
+    # Apple Silicon has no throttle mask; `pmset -g therm`'s CPU_Speed_Limit
+    # is the one unprivileged thermal signal, and a limit under 100 is the
+    # SoC under pressure. Same semantics as the NVML branch -- percent of
+    # samples throttled -- so a Mac row and an NVIDIA row read alike, and
+    # the API's "any thermal throttling" ingest gate can see a Mac at all.
+    if out["thermal_throttle_pct"] is None:
+        limits = [s.cpu_speed_limit_pct for s in samples if s.cpu_speed_limit_pct is not None]
+        if limits:
+            out["thermal_throttle_pct"] = 100.0 * sum(1 for v in limits if v < 100) / len(limits)
+
     return out
+
+
+SAMPLER_GAP_THRESHOLD_S = 30.0
+"""A gap between consecutive samples longer than this is the sampler not
+running, not a slow tick: 150x the 5 Hz interval. The Apple prism wave's
+sleeps were 925 s; a stalled NVML read is under a second."""
+
+
+def compute_sampler_gaps(samples: list[TelemetrySample]) -> dict[str, float | int | None]:
+    """How long, and how often, the sampler was absent during the run.
+
+    A laptop that sleeps between requests leaves holes in the sample series.
+    The hardware counter's delta is unaffected (nothing ran while asleep);
+    the 5 Hz integral is not, because the next sample's power is multiplied
+    by the whole hole. Storing the hole makes `counter_vs_integration_pct_diff`
+    explicable rather than mysterious, and lets a reader refuse the row.
+    """
+    if len(samples) < 2:
+        return {"sampler_gap_s": None, "sampler_gap_count": None}
+    gaps = [
+        later.ts - earlier.ts
+        for earlier, later in zip(samples, samples[1:])
+        if later.ts - earlier.ts > SAMPLER_GAP_THRESHOLD_S
+    ]
+    return {"sampler_gap_s": float(sum(gaps)), "sampler_gap_count": len(gaps)}
 
 
 def compute_counter_energy(
@@ -313,6 +348,9 @@ def compute_metrics(
     gguf_repo: str | None = None,
     gguf_revision: str | None = None,
     weights_digest: str | None = None,
+    engine_ctx_size: int | None = None,
+    engine_build: str | None = None,
+    power_source: str | None = None,
 ) -> RunMetrics:
     """Compute derived energy metrics from raw telemetry and inference results.
 
@@ -483,6 +521,9 @@ def compute_metrics(
         gguf_repo=gguf_repo,
         gguf_revision=gguf_revision,
         weights_digest=weights_digest,
+        engine_ctx_size=engine_ctx_size,
+        engine_build=engine_build,
+        power_source=power_source,
         joules_per_token=joules_per_token,
         total_joules_gpu=total_joules_gpu,
         total_joules_cpu=total_joules_cpu,
@@ -522,6 +563,7 @@ def compute_metrics(
         **shape,
         **health,
         **counter,
+        **compute_sampler_gaps(samples),
         **costmodel,
         **streaming,
     )

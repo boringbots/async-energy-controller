@@ -75,6 +75,7 @@ def _write_telemetry_parquet(telemetry_file: Path, samples: list[TelemetrySample
             "gpu_perf_state": [s.gpu_perf_state for s in samples],
             "cpu_rapl_uj": [s.cpu_rapl_uj for s in samples],
             "cpu_rapl_dram_uj": [s.cpu_rapl_dram_uj for s in samples],
+            "cpu_speed_limit_pct": [s.cpu_speed_limit_pct for s in samples],
         }
         schema = pa.schema(
             [
@@ -92,6 +93,7 @@ def _write_telemetry_parquet(telemetry_file: Path, samples: list[TelemetrySample
                 ("gpu_perf_state", pa.int64()),  # nullable
                 ("cpu_rapl_uj", pa.float64()),  # nullable, never set today (bench.sampler)
                 ("cpu_rapl_dram_uj", pa.float64()),  # nullable, same
+                ("cpu_speed_limit_pct", pa.int64()),  # nullable, Apple only (bench.apple_sampler)
             ]
         )
         table = pa.table(data, schema=schema)

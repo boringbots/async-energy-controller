@@ -63,6 +63,7 @@ from hmasync_controller.bench.quick import (
     QuickSuiteResult,
     _run_bench_suite,
     detect_engine,
+    fetch_llamacpp_props,
 )
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT
 from hmasync_controller.bench.roster import REFERENCE_ENTRY
@@ -167,6 +168,7 @@ async def run_reference_suite(
     client = VLLMClient(host=host, port=llamacpp_port)
     client.base_url = detected.base_url
     served_models = await client.get_models()
+    props = await fetch_llamacpp_props(detected.base_url)
     if not served_models:
         raise ModelNotAvailableError(
             "llama-server is healthy but GET /v1/models reports no loaded "
@@ -200,6 +202,8 @@ async def run_reference_suite(
     )
 
     return await _run_bench_suite(
+        engine_ctx_size=props.n_ctx,
+        engine_build=props.build_info,
         # Weights verified above, so the row records the anchor's own join
         # keys (Qwen/Qwen3.5-9B, Q4_K_M) instead of llama-server's `-m` alias.
         entry=REFERENCE_ENTRY,

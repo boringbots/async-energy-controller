@@ -1350,3 +1350,93 @@ def test_no_numpy_import_in_metrics_package():
             assert not any(n and n.split(".")[0] == "numpy" for n in names), (
                 f"{module.__name__} imports numpy: {names}"
             )
+
+
+class TestSamplerGaps:
+    """A laptop that sleeps between requests leaves holes in the sample
+    series; the row now says how long the sampler was absent."""
+
+    def _ticks(self, ts):
+        return [
+            TelemetrySample(ts=t, gpu_power_w=3.0, gpu_util_pct=None, gpu_mem_used_mib=None, gpu_temp_c=None)
+            for t in ts
+        ]
+
+    def test_a_continuous_series_has_no_gap(self):
+        from hmasync_controller.bench.metrics.compute import compute_sampler_gaps
+
+        out = compute_sampler_gaps(self._ticks([0.0, 0.2, 0.4, 0.6]))
+        assert out == {"sampler_gap_s": 0.0, "sampler_gap_count": 0}
+
+    def test_one_sleep_is_one_gap_of_its_length(self):
+        """925 s is the lid-closed maintenance-wake period the Apple prism
+        wave showed; a 0.2 s tick around it is not a gap."""
+        from hmasync_controller.bench.metrics.compute import compute_sampler_gaps
+
+        out = compute_sampler_gaps(self._ticks([0.0, 0.2, 0.4, 925.4, 925.6]))
+        assert out["sampler_gap_count"] == 1
+        assert abs(out["sampler_gap_s"] - 925.0) < 1e-6
+
+    def test_fewer_than_two_samples_is_unknown_not_zero(self):
+        from hmasync_controller.bench.metrics.compute import compute_sampler_gaps
+
+        assert compute_sampler_gaps(self._ticks([5.0])) == {"sampler_gap_s": None, "sampler_gap_count": None}
+
+    def test_the_row_carries_the_gap_and_the_engine_window(self):
+        samples, inference_results = _basic_inputs()
+        samples.append(
+            TelemetrySample(ts=samples[-1].ts + 600.0, gpu_power_w=200.0, gpu_util_pct=80.0, gpu_mem_used_mib=8000.0, gpu_temp_c=65.0)
+        )
+        metrics = compute_metrics(
+            run_id="r", label="l", model="m", quantization=None, target_host="h",
+            samples=samples, inference_results=inference_results,
+            kwh_before=None, kwh_after=None, ambient_c_start=None,
+            engine_ctx_size=4096, engine_build="b1-5d80cff0", power_source="battery",
+        )
+        assert metrics.sampler_gap_count == 1
+        assert abs(metrics.sampler_gap_s - 600.0) < 1e-6
+        assert metrics.engine_ctx_size == 4096
+        assert metrics.engine_build == "b1-5d80cff0"
+        assert metrics.power_source == "battery"
+
+    def test_the_new_fields_default_to_unread(self):
+        samples, inference_results = _basic_inputs()
+        metrics = compute_metrics(
+            run_id="r", label="l", model="m", quantization=None, target_host="h",
+            samples=samples, inference_results=inference_results,
+            kwh_before=None, kwh_after=None, ambient_c_start=None,
+        )
+        assert (metrics.engine_ctx_size, metrics.engine_build, metrics.power_source) == (None, None, None)
+        assert metrics.sampler_gap_s == 0.0
+
+
+class TestAppleThermalRollup:
+    def test_cpu_speed_limit_fills_thermal_throttle_pct_when_nvml_is_absent(self):
+        from hmasync_controller.bench.metrics.compute import compute_hardware_health
+
+        samples = [
+            TelemetrySample(ts=float(i), gpu_power_w=3.0, gpu_util_pct=None, gpu_mem_used_mib=None,
+                            gpu_temp_c=None, cpu_speed_limit_pct=v)
+            for i, v in enumerate([100, 100, 80, 60])
+        ]
+        assert compute_hardware_health(samples)["thermal_throttle_pct"] == 50.0
+
+    def test_an_unread_channel_stays_none(self):
+        from hmasync_controller.bench.metrics.compute import compute_hardware_health
+
+        samples = [
+            TelemetrySample(ts=float(i), gpu_power_w=3.0, gpu_util_pct=None, gpu_mem_used_mib=None, gpu_temp_c=None)
+            for i in range(3)
+        ]
+        assert compute_hardware_health(samples)["thermal_throttle_pct"] is None
+
+    def test_nvml_wins_when_both_are_present(self):
+        from hmasync_controller.bench.metrics.compute import compute_hardware_health
+
+        samples = [
+            TelemetrySample(ts=float(i), gpu_power_w=300.0, gpu_util_pct=90.0, gpu_mem_used_mib=1.0,
+                            gpu_temp_c=70.0, gpu_throttle_reasons=0, cpu_speed_limit_pct=50)
+            for i in range(2)
+        ]
+        assert compute_hardware_health(samples)["thermal_throttle_pct"] == 0.0
+

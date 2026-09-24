@@ -87,6 +87,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+import httpx
+
 from hmasync_controller.bench.artifact import generate_run_id
 from hmasync_controller.bench.engines import (
     DEFAULT_LLAMACPP_PORT,
@@ -808,6 +810,9 @@ def _build_run_metrics(
     gpu_info: dict[str, object],
     target_host: str,
     label_prefix: str,
+    *,
+    engine_ctx_size: int | None = None,
+    engine_build: str | None = None,
 ) -> RunMetrics | None:
     """Build one `RunMetrics` from a measured `QuickTaskRun` via the same
     `compute_metrics()` every other caller uses. No Home Assistant anywhere
@@ -822,6 +827,16 @@ def _build_run_metrics(
     power_suffix = f"_{task_run.power_limit_w}w" if task_run.power_limit_w is not None else ""
     label = f"{label_prefix}_{task_run.task_name}{power_suffix}"
     run_id = generate_run_id(label)
+    if engine_ctx_size is not None and task_run.max_tokens > engine_ctx_size:
+        # The window binds before the cap: `truncated_pct` will describe the
+        # window while `max_tokens` describes a number the engine never
+        # reached. The row carries both; this is the moment to say so.
+        logger.warning(
+            "%s: the engine's context window (%d) is smaller than max_tokens "
+            "(%d); any finish_reason=length here is the WINDOW, not the cap, "
+            "and the row is not comparable with one served at the cap.",
+            label, engine_ctx_size, task_run.max_tokens,
+        )
     try:
         return compute_metrics(
             run_id=run_id,
@@ -860,6 +875,9 @@ def _build_run_metrics(
             gguf_repo=model.record_gguf_repo,
             gguf_revision=model.record_gguf_revision,
             weights_digest=model.record_weights_digest,
+            engine_ctx_size=engine_ctx_size,
+            engine_build=engine_build,
+            power_source=gpu_info.get("power_source"),
         )
     except MetricsComputeError as e:
         logger.warning("bench quick: failed to compute metrics for %s: %s", label, e)
@@ -1078,6 +1096,52 @@ def _warn_if_over_budget(
     )
 
 
+@dataclass(frozen=True)
+class LlamaCppProps:
+    """What llama-server's `GET /props` says about itself. Every field is
+    None when unread; a mode that needs one to be present checks it."""
+
+    chat_template: str | None = None
+    n_ctx: int | None = None
+    build_info: str | None = None
+
+
+def parse_llamacpp_props(data: object) -> LlamaCppProps:
+    """The three fields this package reads out of a `/props` body."""
+    if not isinstance(data, dict):
+        return LlamaCppProps()
+    settings = data.get("default_generation_settings")
+    n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+    template = data.get("chat_template")
+    build = data.get("build_info")
+    return LlamaCppProps(
+        chat_template=template if isinstance(template, str) else None,
+        n_ctx=int(n_ctx) if isinstance(n_ctx, (int, float)) else None,
+        build_info=build if isinstance(build, str) else None,
+    )
+
+
+async def fetch_llamacpp_props(base_url: str) -> LlamaCppProps:
+    """Read `/props`, or return all-None when the server cannot serve it.
+
+    Advisory and deliberately non-fatal: the attach modes identify their
+    model from `GET /v1/models`, so nothing about the measurement depends on
+    this. It exists because of one wave: the Apple prism cells of
+    2026-09-23/24 ran in a 4,096-token window while recording the 16,384
+    cap they had REQUESTED, and nothing in the row said so until the item
+    table was read by hand. `n_ctx` goes on the row as `engine_ctx_size`,
+    `build_info` as `engine_build`.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{base_url}/props")
+        if response.status_code != 200:
+            return LlamaCppProps()
+        return parse_llamacpp_props(response.json())
+    except (httpx.RequestError, ValueError):
+        return LlamaCppProps()
+
+
 async def _run_bench_suite(
     *,
     engine_choice: str | None,
@@ -1096,6 +1160,8 @@ async def _run_bench_suite(
     quantization: str | None = None,
     gguf_repo: str | None = None,
     gguf_revision: str | None = None,
+    engine_ctx_size: int | None = None,
+    engine_build: str | None = None,
 ) -> QuickSuiteResult:
     """Shared orchestration behind `run_quick_suite` and `run_calibrate_suite`
     (US-MERGE-05): detect an engine, verify (never pull) the reference
@@ -1178,6 +1244,12 @@ async def _run_bench_suite(
     # means there is nothing this function can measure at all.
     gpu_info = await telemetry.gpu_info()
     engine_version = await detected.adapter.version()
+    if gpu_info.get("power_source") == "battery":
+        logger.warning(
+            "this Mac is on battery: macOS caps GPU clocks off mains, so the "
+            "rows will record power_source=battery and should not be compared "
+            "with rows measured on AC."
+        )
     # BOTH restore candidates, captured BEFORE the sweep touches anything --
     # after it runs, "what the card is set to" is just the last cap applied.
     #
@@ -1323,6 +1395,8 @@ async def _run_bench_suite(
             gpu_info,
             resolved_target_host,
             label_prefix,
+            engine_ctx_size=engine_ctx_size,
+            engine_build=engine_build,
         )
         if run_metrics is None:
             continue

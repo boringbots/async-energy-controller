@@ -45,8 +45,6 @@ import logging
 import re
 from dataclasses import dataclass
 
-import httpx
-
 from hmasync_controller.bench.engines import DEFAULT_LLAMACPP_PORT, DEFAULT_OLLAMA_PORT
 from hmasync_controller.bench.quick import (
     FULL_TASKS,
@@ -56,6 +54,7 @@ from hmasync_controller.bench.quick import (
     QuickSuiteResult,
     _run_bench_suite,
     detect_engine,
+    fetch_llamacpp_props,
 )
 from hmasync_controller.bench.vllm_client import VLLMClient
 
@@ -269,7 +268,11 @@ def _how_to_serve_it() -> str:
     lines += [
         "",
         "  hf download <repo> <file> --revision <rev> --local-dir ./prism-models",
-        "  llama-server -m ./prism-models/<file> -c 4096 --port 8080",
+        "  llama-server -m ./prism-models/<file> -c 16384 --fit off --port 8080",
+        "",
+        "16384 is the lab's window, and it matters: at -c 4096 the 2026-09-23",
+        "Apple wave cut 2-26% of math500 items at the WINDOW while recording",
+        "the 16384 cap it had asked for. The row now stores what /props says.",
         "",
         "One rung per server: llama-server holds one GGUF for its lifetime and",
         "this package never launches or swaps an engine. Restart it between",
@@ -335,25 +338,6 @@ def thinking_axis_note(chat_template: str | None) -> tuple[str, str]:
     )
 
 
-async def _fetch_chat_template(base_url: str) -> str | None:
-    """The template llama-server will render, or None if it cannot be read.
-
-    Advisory only, and deliberately non-fatal: this tier identifies its rung
-    from `GET /v1/models`, so nothing about the measurement depends on
-    `/props`. It is read for the thinking axis alone and never stored on a
-    row -- a server too old to serve `/props` should still produce a rung.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{base_url}/props")
-        if response.status_code != 200:
-            return None
-        template = response.json().get("chat_template")
-    except (httpx.RequestError, ValueError):
-        return None
-    return template if isinstance(template, str) else None
-
-
 async def run_prism_suite(
     *,
     host: str = "localhost",
@@ -408,12 +392,14 @@ async def run_prism_suite(
 
     # The row records the kwarg that was SENT; this says whether it did any
     # work. Advisory -- see `thinking_axis_note` for why the distinction
-    # matters and `_fetch_chat_template` for why a failure here is not fatal.
-    mechanism, note = thinking_axis_note(await _fetch_chat_template(detected.base_url))
+    # matters and `fetch_llamacpp_props` for why a failure here is not fatal.
+    props = await fetch_llamacpp_props(detected.base_url)
+    mechanism, note = thinking_axis_note(props.chat_template)
     if mechanism == THINKING_AXIS_UNKNOWN:
         logger.warning("  thinking: %s", note)
     else:
         logger.info("  thinking: %s", note)
+    logger.info("  window  : %s tokens  build: %s", props.n_ctx, props.build_info)
 
     return await _run_bench_suite(
         engine_choice="llamacpp",
@@ -434,4 +420,6 @@ async def run_prism_suite(
         entry=entry,
         gguf_repo=entry.repo,
         gguf_revision=entry.revision,
+        engine_ctx_size=props.n_ctx,
+        engine_build=props.build_info,
     )
